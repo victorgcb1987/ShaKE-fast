@@ -45,8 +45,8 @@ This pipeline can be run with `omics_diversity_pipeline.py`and it accepts the fo
   `--kmer_size KMER_SIZE, -k KMER_SIZE` (Optional, 21 by default): the kmer size used by kmc.
   
   `--merge_universe, -m` (Optional, False by default): This switchs whether if the kmer universe size should be calculated from all items from a group (True) or only for each sub group.
-  
-  `--presence, -p` (Optional, False by default) switchs change diversity calculation to presence/absence, counting all kmer count values to 1 if is present. For expression tables, a gene will throw a value of 1 if a gene has a TPM of 1 or more or 0 if its less than 1. 
+
+  Every run also computes a presence/absence variant of the diversity/kolmogorov estimators alongside the regular count-based ones, reporting both in the same `results.tsv` row (see below) — counting all kmer count values to 1 if present (or, for expression tables, a gene gets a value of 1 if its TPM is 1 or more, 0 otherwise). There is no separate flag for this; it's always calculated.
 
   ## Output
 
@@ -54,24 +54,27 @@ This pipeline can be run with `omics_diversity_pipeline.py`and it accepts the fo
 
   Shake will generate a table called `results.tsv` inside the directory specified with the `--output_dir` argument. This table has the following format:
 
-| Group      | Subgroup | Rep              | Kind         | Subgroup_Universe_Size | Diversity_log2 | Specifity_log2 | Diversity_log10 | Specifity_log10 | Kolmogorov         |
-|------------|----------|------------------|--------------|------------------------|----------------|----------------|------------------|------------------|---------------------|
-| ERR3333388 | R        | ERR3333388_R1    | transcriptome| 40072639               | 22.7620354967  | 2.4940786897   | 6.8520554469     | 0.7507924971     | 0.0636632271        |
-| ERR3333389 | R        | ERR3333389_R1    | transcriptome| 38691164               | 22.9552288052  | 2.2502719911   | 6.9102124277     | 0.6773993677     | 0.0648244898        |
-| ERR3333390 | R        | ERR3333390_R1    | transcriptome| 39507337               | 22.9614172079  | 2.2742000608   | 6.9120753225     | 0.6846024344     | 0.0653194914        |
-| ERR3333391 | R        | ERR3333391_R1    | transcriptome| 40188471               | 22.5576212642  | 2.7026570900   | 6.7905206314     | 0.8135808521     | 0.0647497717        |
-| ERR3333392 | R        | ERR3333392_R1    | transcriptome| 36116326               | 21.8123101535  | 3.2938376502   | 6.5661596309     | 0.9915439335     | 0.0630993513        |
+| Group      | Subgroup | Rep              | Kind         | Subgroup_Universe_Size | Diversity_log2 | Specifity_log2 | Diversity_log10 | Specifity_log10 | Kolmogorov         | Diversity_log2_presence | Specifity_log2_presence | Diversity_log10_presence | Specifity_log10_presence | Kolmogorov_presence |
+|------------|----------|------------------|--------------|------------------------|----------------|----------------|------------------|------------------|---------------------|--------------------------|---------------------------|----------------------------|-----------------------------|-----------------------|
+| ERR3333388 | R        | ERR3333388_R1    | transcriptome| 40072639               | 22.7620354967  | 2.4940786897   | 6.8520554469     | 0.7507924971     | 0.0636632271        | *(same 5 metrics, presence/absence)* | | | | |
+| ERR3333389 | R        | ERR3333389_R1    | transcriptome| 38691164               | 22.9552288052  | 2.2502719911   | 6.9102124277     | 0.6773993677     | 0.0648244898        | *(same 5 metrics, presence/absence)* | | | | |
+| ERR3333390 | R        | ERR3333390_R1    | transcriptome| 39507337               | 22.9614172079  | 2.2742000608   | 6.9120753225     | 0.6846024344     | 0.0653194914        | *(same 5 metrics, presence/absence)* | | | | |
+| ERR3333391 | R        | ERR3333391_R1    | transcriptome| 40188471               | 22.5576212642  | 2.7026570900   | 6.7905206314     | 0.8135808521     | 0.0647497717        | *(same 5 metrics, presence/absence)* | | | | |
+| ERR3333392 | R        | ERR3333392_R1    | transcriptome| 36116326               | 21.8123101535  | 3.2938376502   | 6.5661596309     | 0.9915439335     | 0.0630993513        | *(same 5 metrics, presence/absence)* | | | | |
 
+(the columns after Kolmogorov are the real, currently-generated `Diversity_log2_presence`/`Specifity_log2_presence`/`Diversity_log10_presence`/`Specifity_log10_presence`/`Kolmogorov_presence` columns; sample values are omitted here since this table predates that addition)
 
   `Group , Subgroup, Rep and Kind`: have the values provided by the user in the file of files.
   
   `Subgroup_Universe_Size`: is the number of unique K-mers (universe size) found in the dataset.
   
-  `Diversity_log2 and Diversity_log10`: is the Shannon Diversity Index score calculated to for each dataset, using log2 and log10.
+  `Diversity_log2 and Diversity_log10`: is the Shannon Diversity Index score calculated to for each dataset, using log2 and log10, from the raw K-mer/expression counts.
   
-  `Specificty_log2 and Specifity_log10`:is the K-mer specifity of each dataset. A specifity value of 0 means that each kind of K-mer is equally represented in a given dataset and higher values means that some K-mers are overrepresented. Specificty is calculated for log2 and log10. It would be 0 or near 0 `--presence` option is used
+  `Specificty_log2 and Specifity_log10`: is the K-mer specifity of each dataset. A specifity value of 0 means that each kind of K-mer is equally represented in a given dataset and higher values means that some K-mers are overrepresented. Specificty is calculated for log2 and log10.
   
   `Kolmogorov`: is Kolmogorov complexity measurement. Is an alternative measurement for Shannon Diversity Index that reduces the impact of K-mers exclusive to unique datasets from the same group.
+
+  `Diversity_log2_presence, Specifity_log2_presence, Diversity_log10_presence, Specifity_log10_presence and Kolmogorov_presence`: the same five metrics recalculated using presence/absence instead of raw counts (every present K-mer/gene counts as 1 regardless of its actual count/TPM). Specifity values here will be 0 or near 0, since presence/absence flattens out over/under-representation. These are always computed alongside the regular columns — there is no separate flag to enable them.
 
   ### File Manifiest
   Other file found in output dir will be `file_manifiest.tsv`with the following format:

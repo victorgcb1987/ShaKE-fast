@@ -1,6 +1,8 @@
 from subprocess import run
 from pathlib import Path
 
+from src.utils import UnionFind
+
 
 def create_input_file(fpaths, name, output_fpath):
     filepats_fpath = output_fpath / "{}.files".format(name)
@@ -100,3 +102,33 @@ def calculate_hetkmers(dump_fpath, out_fdir):
         results = {"command": cmd, "returncode": run_.returncode,
                    "msg": run_.stderr.decode(), "out_fpath": str(sequence_file)}
     return results
+
+
+def merge_kmers_by_hetkmers(dump_fpath, hetkmers_fpath, out_fdir):
+    #Union-find merge of k-mers connected by a hetkmer pair, collapsing
+    #near-identical k-mers into a single representative with summed counts.
+    name = dump_fpath.name
+    out_fpath = out_fdir / "{}_grouped_by_hetkmers.dump".format(name.replace(".dump", ""))
+    cmd = "union-find merge {} using hetkmers {}".format(dump_fpath, hetkmers_fpath)
+    if out_fpath.exists():
+        return {"command": cmd, "returncode": 99, "name": name,
+                "msg": "output file exists already", "out_fpath": out_fpath}
+    with open(hetkmers_fpath) as fhand:
+        hetkmers = [(line.rstrip().split()[1], line.split()[0]) for line in fhand]
+    with open(dump_fpath) as fhand:
+        values = {line.split()[0]: int(line.rstrip().split()[1]) for line in fhand}
+    unique_elements = set(values.keys())
+    for hetkmer in hetkmers:
+        unique_elements.update(hetkmer)
+    uf = UnionFind(unique_elements)
+    for hetkmer in hetkmers:
+        uf.join(hetkmer[0], hetkmer[1])
+    groups = {}
+    for seq, value in values.items():
+        representative = uf.find(seq)
+        groups[representative] = groups.get(representative, 0) + value
+    with open(out_fpath, "w") as out_fhand:
+        for seq, value in groups.items():
+            out_fhand.write(f"{seq}\t{value}\n")
+    return {"command": cmd, "returncode": 0, "name": name,
+            "msg": "", "out_fpath": out_fpath}

@@ -43,7 +43,10 @@ def calculate_kmer_estimators(kmer_counts):
 
 
 def calculate_sample_shannon_estimators(filepath, universe_size, estimators, group=None,
-                                sub=None, name=None, file=None, pipe=False, kind=None, binary=False):
+                                sub=None, name=None, file=None, pipe=False, kind=None, binary=False,
+                                suffix=""):
+     #`suffix` (e.g. "_presence") lets a regular and a presence/absence pass over the same
+     #sample be merged into the same estimators[...] entry instead of overwriting each other.
      with open(filepath) as fhand:
           # Single pass over the dump file: previously this read the whole
           # file into `raw_values`, then built two more full-length lists
@@ -69,21 +72,23 @@ def calculate_sample_shannon_estimators(filepath, universe_size, estimators, gro
           diversity_value_log2 = diversity_value_log10 / LOG10_2
           specifity_log2 = log2(universe_size) - diversity_value_log2
 
-          results = {"diversity_log10": diversity_value_log10, "specifity_log10": specifity_log10,
-                     "diversity_log2": diversity_value_log2, "specifity_log2": specifity_log2,
-                     "universe_size": universe_size, "sub": sub,
-                     "name": name, "kind": kind, "file": file}
+          computed = {"diversity_log10"+suffix: diversity_value_log10, "specifity_log10"+suffix: specifity_log10,
+                      "diversity_log2"+suffix: diversity_value_log2, "specifity_log2"+suffix: specifity_log2}
           if pipe:
                if group not in estimators:
                     estimators[group] = {}
                if sub not in estimators[group]:
-                    estimators[group][sub] = {name: results}
-               else:
-                    estimators[group][sub][name] = results
+                    estimators[group][sub] = {}
+               entry = estimators[group][sub].setdefault(name, {})
+               entry.update(computed)
+               entry.setdefault("universe_size", universe_size)
+               entry.setdefault("sub", sub)
+               entry.setdefault("name", name)
+               entry.setdefault("kind", kind)
+               entry.setdefault("file", file)
           else:
-               estimators[filepath.stem] = {"diversity_log10": diversity_value_log10, "specifity_log10": specifity_log10,
-                                            "diversity_log2": diversity_value_log2, "specifity_log2": specifity_log2}
-          
+               estimators.setdefault(filepath.stem, {}).update(computed)
+
 
 
 def calculate_kmer_estimators(filepaths, universe_size , kmer):

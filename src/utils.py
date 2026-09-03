@@ -51,6 +51,14 @@ def get_universe_size(fpaths):
     return int(results.stdout.decode().strip().split()[0])
 
 
+def log_and_print(log_fhand, msg):
+    #Writes msg to both stdout and the run log, flushing the log immediately
+    #so it stays readable while the pipeline is still running.
+    print(msg)
+    log_fhand.write(msg+"\n")
+    log_fhand.flush()
+
+
 def check_run(results):
     if results["returncode"] == 0:
         return "#SUCCESS: {}".format(results["command"])

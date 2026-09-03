@@ -53,7 +53,8 @@ def convert_to_binary(number, presence=False):
 
 
 def create_kmer_binary_file(in_filepath, out_filepath, num_zeros, presence=False):
-    if not Path(out_filepath).exists():
+    uncompressed_exists = Path(out_filepath).exists()
+    if not uncompressed_exists:
         # NOTE: this used to call fhand.flush() after writing every single
         # k-mer line (and every padding zero). With tens/hundreds of
         # millions of k-mers that turns buffered sequential I/O into one
@@ -68,45 +69,57 @@ def create_kmer_binary_file(in_filepath, out_filepath, num_zeros, presence=False
                 if num_zeros:
                     not_compressed_fhand.writelines(zero_line for _ in range(num_zeros))
     compressed = "{}.gz".format(out_filepath)
-    if not Path(compressed).exists():
-        cmd = "gzip -c {} > {}".format(out_filepath, compressed)
+    compressed_exists = Path(compressed).exists()
+    cmd = "gzip -c {} > {}".format(out_filepath, compressed)
+    if not compressed_exists:
         run(cmd, shell=True)
-    return compressed
+    already_done = uncompressed_exists and compressed_exists
+    return {"command": cmd, "returncode": 99 if already_done else 0,
+            "msg": "output file exists already" if already_done else "",
+            "out_fpath": compressed}
 
 
 def calculate_kolmogorov(filepath_a, filepath_b):
     return float(os.stat(filepath_a).st_size/ os.stat(filepath_b).st_size)
 
 
-def create_expression_binary_file(in_filepath, units, exclude, out_fpath):
+def create_expression_binary_file(in_filepath, units, exclude, out_fpath, presence=False):
     # Same fix as create_kmer_binary_file: no per-line flush() (here it was
     # even worse - two flushes per row, one per output file), and write in
     # one batched call instead of one write() syscall per row.
     compressed = "{}.gz".format(out_fpath)
+    cmd = "gzip-encode expression binary {} -> {}".format(out_fpath, compressed)
+    if Path(compressed).exists():
+        return {"command": cmd, "returncode": 99,
+                "msg": "output file exists already", "out_fpath": compressed}
     with gzip.open(compressed, 'wb') as compressed_fhand:
         with open(out_fpath, "w") as not_compressed_fhand:
             with open(in_filepath) as fhand:
-                lines = [convert_to_binary(round(float(row[units]), 3)*1000)
+                lines = [convert_to_binary(round(float(row[units]), 3)*1000, presence=presence)
                          for row in DictReader(fhand, delimiter="\t") if row["Reference"] not in exclude]
                 text = "\n".join(lines) + "\n" if lines else ""
                 not_compressed_fhand.write(text)
                 compressed_fhand.write(text.encode())
-    return compressed
+    return {"command": cmd, "returncode": 0, "msg": "", "out_fpath": compressed}
 
 
-def calculate_kolmogorov_estimator(filepath, universe_size, estimators, group=None, 
-                                   sub=None, name=None, kind=None, units="TPM", presence=False):
+def calculate_kolmogorov_estimator(filepath, universe_size, estimators, group=None,
+                                   sub=None, name=None, kind=None, units="TPM", presence=False,
+                                   key="kolmogorov"):
     if presence:
         binary = "{}.presence.binary".format(str(filepath))
     else:
         binary = "{}.binary".format(str(filepath))
     if kind != "expression":
         num_zeros = get_universe_size_difference(filepath, universe_size)
-        compressed_file = create_kmer_binary_file(filepath, binary, num_zeros, presence=presence)
+        binary_results = create_kmer_binary_file(filepath, binary, num_zeros, presence=presence)
     else:
-        compressed_file = create_expression_binary_file(filepath, units, [], binary)
+        binary_results = create_expression_binary_file(filepath, units, [], binary, presence=presence)
+    compressed_file = binary_results["out_fpath"]
     kolmo = calculate_kolmogorov(compressed_file, binary)
-    estimators[group][sub][name]["kolmogorov"] = kolmo
+    estimators[group][sub][name][key] = kolmo
+    return {"command": binary_results["command"], "returncode": binary_results["returncode"],
+            "msg": binary_results["msg"], "name": name, "out_fpath": compressed_file}
 
 
     
