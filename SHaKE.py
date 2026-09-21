@@ -39,6 +39,12 @@ def parse_arguments():
     parser.add_argument("--merge_universe", "-m",
                         help=help_universe, default=False,
                         action="store_true")
+    help_pooled = ("(Optional) Treat transcriptome samples as pooled multi-individual sequencing: "
+                  "relaxes the het-kmer connected-component size cap and skips the allelic "
+                  "coverage-ratio filter used for single individuals. False by default")
+    parser.add_argument("--pooled",
+                        help=help_pooled, default=False,
+                        action="store_true")
     help_exclude = "(optional) Bed file with regions to exclude"
     parser.add_argument("--exclude", "-e",
                         help=help_exclude, type=str,
@@ -79,7 +85,10 @@ def get_arguments():
                 files = line[-1].split(",")
                 checked_files = []
                 for file in files:
-                    if sequence_kind(file) == "bam":
+                    #expression files are TPM/abundance tables, not fasta/fastq/bam -
+                    #sequence_kind() would misclassify (or crash on) them, so skip
+                    #the BAM-conversion check entirely for this kind.
+                    if kind != "expression" and sequence_kind(file) == "bam":
                         if parser.exclude:
                             msg = "Excluding reads from bed file"
                             log_fhand.write(msg+"\n")
@@ -111,6 +120,7 @@ def get_arguments():
             "ram_usage": parser.ram_usage,
             "kmer_size": parser.kmer_size,
             "merge_universe": parser.merge_universe,
+            "pooled": parser.pooled,
             "log": log_fhand}
 
 

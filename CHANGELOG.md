@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. See `PERFORMANC
 
 ## [Unreleased]
 
+### Added
+- New `src/kmerdata.py` module: a compact in-memory k-mer representation (2-bit-per-base integer encoding via numpy) plus every vectorized operation on it - loading, universe size, Shannon entropy, Kolmogorov-ratio, and het-kmer detection/merging.
+- New `--pooled` CLI flag on `SHaKE.py`, switching het-kmer detection between two filter regimes (see below).
+
+### Changed
+- **Het-kmer detection no longer uses `smudgeplot.py`.** Replaced with a native Hamming-distance-1 neighbor search (2-bit-encoded k-mers, vectorized with numpy) feeding the existing union-find merge logic. `smudgeplot.py hetkmers` assumed single-diploid-individual heterozygosity (~50/50 coverage balance between two alleles) - the wrong model for pooled multi-individual resequencing, where allele frequency can be anything and more than 2 alleles can legitimately co-occur at one site.
+  - `--pooled`: relaxed connected-component size cap (up to 6 members) in the Hamming-1 graph, no coverage-ratio requirement.
+  - default (single individual): strict component size cap of exactly 2 (biallelic), plus a coverage-ratio check (`min(count)/max(count) >= 0.2`) - closer to smudgeplot's original model.
+  - In both modes, a component exceeding the size cap is treated as a likely repeat/paralog family and left unmerged, rather than collapsed.
+  - `smudgeplot.py` is no longer a dependency of the pipeline at all (its only other call site, `calculate_cutoffs`, was already dead code).
+- **The raw k-mer dump file (and every file derived from it) is no longer written to disk.** `kmc_tools dump` is streamed directly into Python (`kmc_tools ... dump -s /dev/stdout` via a subprocess pipe) into one in-memory table, used for universe size, Shannon diversity, het-kmer detection, and the Kolmogorov-complexity ratio. The Kolmogorov binary encoding is now built and compressed in memory (`zlib.compress`) - the `.binary`/`.presence.binary` files and their `.gz`s (doubled in count by the earlier presence/absence change) are gone entirely, for both genomic/transcriptome and expression samples.
+  - **Trade-off, accepted deliberately**: the "already done, skip" resumability that existed for the dump/het-kmer-merge/estimator steps is gone, since there's no longer a persisted file to check. Resumability is kept for the expensive step (`count_kmers`' `.kmc_pre`/`.kmc_suf` database build) and the histogram step, both unaffected by this change.
+- `src/kmc.py`: added `build_dump_argv`, building the streaming dump command. `dump_kmer_counts`, `calculate_hetkmers`, `merge_kmers_by_hetkmers` are unchanged and still used by `legacy_scripts/*`.
+- `src/kolmogorov.py`: added `kolmogorov_from_expression_file`, the in-memory equivalent of the old file-based expression Kolmogorov path. The old `create_kmer_binary_file`/`create_expression_binary_file`/`calculate_kolmogorov_estimator` and `src/kmer.py`'s `calculate_sample_shannon_estimators` are no longer called by the pipeline (kept in place, unused, for parity testing - candidates for a future cleanup pass).
+
+### Fixed
+- Found and preserved-not-silently-changed: `create_expression_binary_file`'s Kolmogorov encoding used Python's `gzip.open()` (default compresslevel 9) while `create_kmer_binary_file`'s used the `gzip -c` shell command (default compresslevel 6) - an existing inconsistency between the two Kolmogorov code paths predating this change. The new `kolmogorov_from_expression_file` matches the old per-kind compression level (9 for expression, 6 for genomic/transcriptome) to keep numeric parity with prior runs; the two paths still don't use the same level as each other. Flagged for a decision on whether to unify them, not changed here.
+
+### Verified
+- Native het-kmer detection: a balanced-coverage SNP pair merges in both `--pooled` and default mode; an imbalanced pair (20:1) merges only with `--pooled`; a repeat-family construct (component size > cap) is correctly left unmerged in both modes.
+- Shannon diversity, Kolmogorov ratio (both genomic/transcriptome and expression paths), and universe size all match the old file-based implementations (Shannon: float-tolerance; Kolmogorov: <1% relative difference at realistic scale, expected from zlib vs. gzip container overhead; universe size: exact).
+- Full end-to-end run (real `kmc`/`kmc_tools`, synthetic genomic + transcriptome data) confirms `results.tsv`/`file_manifiest.tsv` are produced correctly and no `.dump`/`.binary`/`.hetkmers_sequences.tsv`/`_grouped_by_hetkmers.dump` files appear anywhere in the output directory - only kmc's own `.kmc_pre`/`.kmc_suf`/`.hist`, the `.files` sidecars, the two output tables, and the log.
+
+### Fixed (continued)
+- `get_arguments()` in `SHaKE.py` called `sequence_kind()` unconditionally on every file in the file-of-files, including `expression`-kind TSV files. Since a TSV isn't fasta/fastq/bam, this raised (and the exception path itself hit a secondary `AttributeError`, since it called `.name` on what can be a plain string). Predated this session's changes entirely. Fixed by skipping the BAM-detection check for `expression`-kind rows (`kind != "expression" and sequence_kind(file) == "bam"`) - verified with a minimal expression-only end-to-end run.
+
 ### Changed
 - Removed the `--presence`/`-p` CLI flag. Instead of choosing between count-based and presence/absence diversity calculation, `SHaKE.py` now always computes both and reports them side by side in `results.tsv`, which gained five new columns: `Diversity_log2_presence`, `Specifity_log2_presence`, `Diversity_log10_presence`, `Specifity_log10_presence`, `Kolmogorov_presence`. Applies to genomic/transcriptome and expression samples alike.
 - Refactored `SHaKE.py`: pipeline orchestration (previously a ~270-line sequential `main()`) moved into a new `src/pipeline.py`, split into named stage functions (`build_databases`, `build_histograms`, `dump_counts`, `merge_hetkmers`, `compute_universe_sizes`, `compute_estimators`, `compute_expression_estimators`, `write_outputs`, `run_pipeline`). `SHaKE.py` is now a thin CLI entrypoint. The existing performance-optimized bodies of `src/kmer.py`, `src/kolmogorov.py`, and `src/utils.py` (single-pass entropy calc, batched I/O, merge-sort universe size — see `PERFORMANCE.md`) are unchanged; only their signatures/return values gained the plumbing described below.

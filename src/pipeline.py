@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from src.kmc import (count_kmers, create_input_file, create_kmer_histogram,
-                     dump_kmer_counts, calculate_hetkmers, merge_kmers_by_hetkmers)
-from src.kolmogorov import calculate_kolmogorov_estimator
-from src.utils import check_run, sequence_kind, get_universe_size, log_and_print
-from src.kmer import calculate_sample_shannon_estimators
+from src.kmc import count_kmers, create_input_file, create_kmer_histogram
+from src.kmerdata import (load_kmer_table, merge_hetkmers_native, union_universe_size,
+                          shannon_estimators_from_counts, kolmogorov_from_table)
+from src.kolmogorov import kolmogorov_from_expression_file
+from src.utils import check_run, sequence_kind, log_and_print
 from src.expression import calculate_sample_estimators as expression_diversity
 
 
@@ -98,103 +98,108 @@ def build_histograms(database, log_fhand):
     return histograms
 
 
-def dump_counts(database, threads, log_fhand):
-    #STEP 3: dump raw kmer counts from each database.
-    count_dumps = {}
+def dump_counts(database, threads, kmer_size, log_fhand):
+    #STEP 3: load raw kmer counts from each database straight into memory
+    #(streamed from kmc_tools dump - no .dump file is ever written to disk).
+    kmer_tables = {}
     log_and_print(log_fhand, "#STEP 3: creating count dumps\n")
     for group, subs in database.items():
-        count_dumps[group] = {}
+        kmer_tables[group] = {}
         for sub, data in subs.items():
-            count_dumps[group][sub] = {}
+            kmer_tables[group][sub] = {}
             for name, values in data.items():
-                results = dump_kmer_counts(values["file"], name,
+                #NOTE: reads lowerbound/upperbound from `data` (the per-sub dict),
+                #not `values` (the per-name dict) - a known, intentionally
+                #unfixed pre-existing bug (see CHANGELOG). Preserved as-is.
+                table, results = load_kmer_table(values["file"], kmer_size,
                                             lower_bound=data.get("lowerbound", 1),
                                             upper_bound=data.get("upperbound", 9999999999),
-                                            threads=threads, pipe=True)
-                count_dumps[group][sub][name] = {"file": results["out_fpath"], "kind": values["kind"],
+                                            threads=threads, merged=values.get("merged", False))
+                table.kind = values["kind"]
+                kmer_tables[group][sub][name] = {"table": table, "kind": values["kind"],
                                                     "merged": values.get("merged", False)}
                 log_and_print(log_fhand, check_run(results))
-    return count_dumps
+    return kmer_tables
 
 
-def merge_hetkmers(count_dumps, output_dir, log_fhand):
-    #STEP 4: for transcriptome data, compute hetkmers then collapse
-    #near-identical kmers together via a union-find merge.
-    log_and_print(log_fhand, "#STEP 4: calculating hetkmers for transcriptomic data\n")
-    for group, subs in count_dumps.items():
+def merge_hetkmers(kmer_tables, pooled, log_fhand):
+    #STEP 4: for transcriptome data, detect hetkmers (native Hamming-distance-1
+    #neighbor search - no smudgeplot) then collapse near-identical kmers
+    #together. `pooled` switches between a relaxed component-size cap (pooled
+    #multi-individual data) and a strict biallelic + coverage-ratio check
+    #(single individual).
+    log_and_print(log_fhand, "#STEP 4: native hetkmer detection for transcriptomic data (pooled={})\n".format(pooled))
+    for group, subs in kmer_tables.items():
         for sub, data in subs.items():
             for name, values in data.items():
                 if values["kind"] != "transcriptome":
                     continue
-                het_results = calculate_hetkmers(values["file"], output_dir)
-                log_and_print(log_fhand, check_run(het_results))
-                merge_results = merge_kmers_by_hetkmers(values["file"], het_results["out_fpath"], output_dir)
-                log_and_print(log_fhand, check_run(merge_results))
-                values["file"] = merge_results["out_fpath"]
-    return count_dumps
+                merged_table, stats = merge_hetkmers_native(values["table"], pooled=pooled)
+                values["table"] = merged_table
+                msg = "#SUCCESS: {} components_found={} components_merged={} components_rejected={}".format(
+                    name, stats["components_found"], stats["components_merged"], stats["components_rejected"])
+                log_and_print(log_fhand, msg)
+    return kmer_tables
 
 
-def compute_universe_sizes(count_dumps, merge_universe):
+def compute_universe_sizes(kmer_tables, merge_universe):
     universe_sizes = {}
     if not merge_universe:
-        for group, data in count_dumps.items():
+        for group, data in kmer_tables.items():
             universe_sizes[group] = {}
             for sub, values in data.items():
                 merged = False
-                files = []
+                tables = []
                 for name, features in values.items():
-                    files.append(str(features["file"]))
+                    tables.append(features["table"])
                     if features.get("merged", False):
                         merged = True
-                        universe_size = get_universe_size([str(features["file"])])
-                        universe_sizes[group][sub] = universe_size
+                        universe_sizes[group][sub] = features["table"].universe_size()
                 if not merged:
-                    universe_size = get_universe_size(files)
-                    universe_sizes[group][sub] = universe_size
+                    universe_sizes[group][sub] = union_universe_size(tables)
     else:
-        for group, data in count_dumps.items():
-            files_to_combine = []
+        for group, data in kmer_tables.items():
+            tables_to_combine = []
             for sub, values in data.items():
                 merged = False
-                files = []
+                tables = []
                 for name, features in values.items():
-                    files.append(str(features["file"]))
+                    tables.append(features["table"])
                     if features.get("merged", False):
                         merged = True
-                        files_to_combine.append(str(features["file"]))
+                        tables_to_combine.append(features["table"])
                 if not merged:
-                    for file in files:
-                        files_to_combine.append(file)
-            universe_sizes[group] = get_universe_size(files_to_combine)
+                    tables_to_combine.extend(tables)
+            universe_sizes[group] = union_universe_size(tables_to_combine)
     return universe_sizes
 
 
-def compute_estimators(count_dumps, universe_sizes, merge_universe, log_fhand):
-    #Shannon diversity + kolmogorov estimators for genomic/transcriptome samples.
-    #Each sample gets both a regular (count-based) and a presence/absence pass,
-    #reported side by side rather than behind a mode switch.
+def compute_estimators(kmer_tables, universe_sizes, merge_universe, log_fhand):
+    #Shannon diversity + kolmogorov estimators for genomic/transcriptome samples,
+    #computed directly from the in-memory KmerTable - no dump/binary files
+    #touch disk anywhere in this step. Each sample gets both a regular
+    #(count-based) and a presence/absence pass, reported side by side.
     results = {}
-    for group, data in count_dumps.items():
+    for group, data in kmer_tables.items():
         for sub, values in data.items():
             for name, features in values.items():
+                table = features["table"]
                 if not merge_universe:
                     universe_size = universe_sizes[group][sub]
                 else:
                     universe_size = universe_sizes[group]
-                calculate_sample_shannon_estimators(features["file"], universe_size, results, group=group,
-                                                    sub=sub, name=name, kind=features["kind"], file=features["file"],
-                                                    pipe=True, binary=False)
-                calculate_sample_shannon_estimators(features["file"], universe_size, results, group=group,
-                                                    sub=sub, name=name, kind=features["kind"], file=features["file"],
-                                                    pipe=True, binary=True, suffix="_presence")
-                kolmo_results = calculate_kolmogorov_estimator(features["file"], universe_size, results, group=group,
-                                                sub=sub, name=name, kind=features["kind"], units="TPM",
-                                                presence=False)
-                log_and_print(log_fhand, check_run(kolmo_results))
-                kolmo_presence_results = calculate_kolmogorov_estimator(features["file"], universe_size, results, group=group,
-                                                sub=sub, name=name, kind=features["kind"], units="TPM",
-                                                presence=True, key="kolmogorov_presence")
-                log_and_print(log_fhand, check_run(kolmo_presence_results))
+                regular = shannon_estimators_from_counts(table.counts, universe_size, presence=False)
+                presence = shannon_estimators_from_counts(table.counts, universe_size, presence=True)
+                entry = results.setdefault(group, {}).setdefault(sub, {}).setdefault(name, {})
+                entry.update(regular)
+                entry.update({key + "_presence": value for key, value in presence.items()})
+                entry["kolmogorov"] = kolmogorov_from_table(table, universe_size, presence=False)
+                entry["kolmogorov_presence"] = kolmogorov_from_table(table, universe_size, presence=True)
+                entry.setdefault("universe_size", universe_size)
+                entry.setdefault("sub", sub)
+                entry.setdefault("name", name)
+                entry.setdefault("kind", features["kind"])
+                log_and_print(log_fhand, "#SUCCESS: computed estimators for {}".format(name))
     return results
 
 
@@ -220,14 +225,11 @@ def compute_expression_estimators(expression, results, log_fhand):
                     "specifity_log10_presence": values_presence["specifity_log10"],
                     "file": Path(file),
                 }
-                kolmo_results = calculate_kolmogorov_estimator(
-                    Path(file), universe_size, results, group=group, sub=sub, name=rep,
-                    kind="expression", units="TPM", presence=False)
-                log_and_print(log_fhand, check_run(kolmo_results))
-                kolmo_presence_results = calculate_kolmogorov_estimator(
-                    Path(file), universe_size, results, group=group, sub=sub, name=rep,
-                    kind="expression", units="TPM", presence=True, key="kolmogorov_presence")
-                log_and_print(log_fhand, check_run(kolmo_presence_results))
+                results[group][sub][rep]["kolmogorov"] = kolmogorov_from_expression_file(
+                    Path(file), "TPM", [], presence=False)
+                results[group][sub][rep]["kolmogorov_presence"] = kolmogorov_from_expression_file(
+                    Path(file), "TPM", [], presence=True)
+                log_and_print(log_fhand, "#SUCCESS: computed estimators for {}".format(rep))
     return results
 
 
@@ -274,12 +276,12 @@ def run_pipeline(arguments):
     log_fhand = arguments["log"]
     database, expression = build_databases(arguments)
     histograms = build_histograms(database, log_fhand)
-    count_dumps = dump_counts(database, arguments["threads"], log_fhand)
-    count_dumps = merge_hetkmers(count_dumps, arguments["output"], log_fhand)
-    universe_sizes = compute_universe_sizes(count_dumps, arguments["merge_universe"])
-    results = compute_estimators(count_dumps, universe_sizes, arguments["merge_universe"], log_fhand)
+    kmer_tables = dump_counts(database, arguments["threads"], arguments["kmer_size"], log_fhand)
+    kmer_tables = merge_hetkmers(kmer_tables, arguments["pooled"], log_fhand)
+    universe_sizes = compute_universe_sizes(kmer_tables, arguments["merge_universe"])
+    results = compute_estimators(kmer_tables, universe_sizes, arguments["merge_universe"], log_fhand)
     results = compute_expression_estimators(expression, results, log_fhand)
     write_outputs(results, arguments["output"])
-    steps = {"database": database, "count_dumps": count_dumps,
+    steps = {"database": database, "kmer_tables": kmer_tables,
              "histograms": histograms, "expression": expression}
     return steps, results

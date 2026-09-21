@@ -2,9 +2,11 @@
 
 ## Requirements
 
-**smudgeplot v0.2.5** : We recommend to use conda (`conda install smudgeplot==0.2.5`) to install this module.  
-
 kmc https://github.com/refresh-bio/KMC. You will need to add kmc binaries to PATH variable for example using `export PATH=$PATH:kmc/install/bin/`
+
+**numpy**: used for k-mer encoding and het-kmer detection. `pip install numpy`.
+
+(smudgeplot is no longer required — het-kmer detection is now done natively, see `--pooled` below.)
 
 clone KATULU respository: `git clone https://github.com/victorgcb1987/ShaKE.git`
 
@@ -26,7 +28,7 @@ In order to runt this program you will need to prepare a file with table similar
 
 The first and second columns are used to label group and subgroup respectively, for example to mark that one tissue in the first column and then a set of files of the same origin/class/etc. with the second column. 
 
-The third column serves to label what kind of data is; you can put whaterver you like but if you use *** transcriptome *** hetkmers will be calculated and kmers and their values will be grouped using this. If you put *** expression ***, files will be treated as expression tables.
+The third column serves to label what kind of data is; you can put whaterver you like but if you use *** transcriptome *** hetkmers will be calculated and kmers and their values will be grouped using this (see `--pooled` below for how this detection behaves). If you put *** expression ***, files will be treated as expression tables.
 
 Fourth and fifth column are the minimun and the maximum values cutoff in order to consider a kmer or not in the analysis.
 
@@ -36,7 +38,7 @@ This pipeline can be run with `omics_diversity_pipeline.py`and it accepts the fo
 
   `--input_file INPUT_FILE, -i INPUT_FILE` (Required): the path to the table previously described
   
-  `--output_dir OUTPUT_DIR, -o OUTPUT_DIR`(Required): the path were interemediate files and results will be stored. It will also check in this ouput for steps already done and will skip these steps.
+  `--output_dir OUTPUT_DIR, -o OUTPUT_DIR`(Required): the path were interemediate files and results will be stored. Building each sample's kmc database (the slow step) is skipped on a rerun if it already exists in this directory; the k-mer dump, het-kmer detection, and diversity/kolmogorov estimators are cheap enough now that they're always recomputed from the kmc database rather than cached to disk (see "Output" below - no `.dump`/binary scratch files are written at all anymore).
   
   `--ram_usage RAM_USAGE, -r RAM_USAGE` (Optional, 1 by default): The max memory usage of kmc.
   
@@ -45,6 +47,8 @@ This pipeline can be run with `omics_diversity_pipeline.py`and it accepts the fo
   `--kmer_size KMER_SIZE, -k KMER_SIZE` (Optional, 21 by default): the kmer size used by kmc.
   
   `--merge_universe, -m` (Optional, False by default): This switchs whether if the kmer universe size should be calculated from all items from a group (True) or only for each sub group.
+
+  `--pooled` (Optional, False by default): controls how het-kmer detection decides whether two k-mers one substitution apart represent the same locus (e.g. a SNP) rather than an unrelated/repeat-family collision. With `--pooled` (multiple individuals pooled into one sample, so allele frequency at a site can be anything and more than 2 alleles can legitimately co-occur), it only rejects a group of connected k-mers once it gets implausibly large (a repeat-family signature). Without it (the default - a single individual, at most 2 alleles per site), it additionally requires the pair's coverage to be reasonably balanced, closer to what a true heterozygous site looks like in one diploid genome. Het-kmer detection is done natively (no external tool) either way.
 
   Every run also computes a presence/absence variant of the diversity/kolmogorov estimators alongside the regular count-based ones, reporting both in the same `results.tsv` row (see below) — counting all kmer count values to 1 if present (or, for expression tables, a gene gets a value of 1 if its TPM is 1 or more, 0 otherwise). There is no separate flag for this; it's always calculated.
 

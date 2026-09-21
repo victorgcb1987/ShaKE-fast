@@ -6,6 +6,10 @@ from pathlib import Path
 from src.utils import get_universe_size
 from subprocess import run
 
+import numpy as np
+
+from src.kmerdata import counts_to_binary_bytes, kolmogorov_ratio
+
 
 '''BINARY_LENGTH=30(a thousand of millions)!!!!
     Steps (expression):
@@ -101,6 +105,26 @@ def create_expression_binary_file(in_filepath, units, exclude, out_fpath, presen
                 not_compressed_fhand.write(text)
                 compressed_fhand.write(text.encode())
     return {"command": cmd, "returncode": 0, "msg": "", "out_fpath": compressed}
+
+
+def kolmogorov_from_expression_file(filepath, units, exclude, presence=False):
+    #In-memory equivalent of create_expression_binary_file + calculate_kolmogorov:
+    #builds the same fixed-width binary encoding used elsewhere, but never
+    #writes it (or its compressed form) to disk - just measures the sizes.
+    with open(filepath) as fhand:
+        values = [round(float(row[units]), 3) * 1000 for row in DictReader(fhand, delimiter="\t")
+                  if row["Reference"] not in exclude]
+    if not values:
+        return 0.0
+    #NOTE: compresslevel=9 to match create_expression_binary_file's original
+    #Python gzip.open() default - which is a *different* level than the 6
+    #that create_kmer_binary_file's `gzip -c` used (its shell-command
+    #default). That per-kind inconsistency predates this change; preserved
+    #here for numeric parity rather than silently unified - see CHANGELOG.
+    if presence:
+        return kolmogorov_ratio(b"01\n" * len(values), compresslevel=9)
+    int_values = np.trunc(np.array(values, dtype=np.float64)).astype(np.int64)
+    return kolmogorov_ratio(counts_to_binary_bytes(int_values, 30), compresslevel=9)
 
 
 def calculate_kolmogorov_estimator(filepath, universe_size, estimators, group=None,

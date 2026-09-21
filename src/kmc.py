@@ -85,6 +85,13 @@ def dump_kmer_counts(db_fpath, name, threads=6, lower_bound=1, upper_bound=99999
     return results
 
  
+def build_dump_argv(db_fpath, threads, lower_bound, upper_bound):
+    #Dumps straight to /dev/stdout so callers can stream the output via
+    #subprocess.Popen(..., stdout=PIPE) without ever writing a dump file.
+    return ["kmc_tools", "-t{}".format(threads), "transform", str(db_fpath),
+            "-ci{}".format(lower_bound), "-cx{}".format(upper_bound), "dump", "-s", "/dev/stdout"]
+
+
 def calculate_hetkmers(dump_fpath, out_fdir):
     name = dump_fpath.name
     out_fname = "{}_hetkmers".format(name)
