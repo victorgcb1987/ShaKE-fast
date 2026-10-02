@@ -55,13 +55,16 @@ def plan_jobs(arguments):
             if dataset["kind"] == "expression":
                 continue
             files = [input_file for input_file in dataset["files"]]
+            bounds = (dataset["lowerbound"], dataset["upperbound"])
             if dataset["sub"] in merges:
                 merges[dataset["sub"]]["files"] += files
                 merges[dataset["sub"]]["num_datasets"] += 1
+                merges[dataset["sub"]]["bounds"].add(bounds)
             else:
                 merges[dataset["sub"]] = {"files": files,
                                             "num_datasets": 1,
-                                            "kind": dataset["kind"]}
+                                            "kind": dataset["kind"],
+                                            "bounds": {bounds}}
         for sub, files in merges.items():
             if files["num_datasets"] == 1:
                 continue
@@ -70,9 +73,19 @@ def plan_jobs(arguments):
                 msg = "ERROR: mixed format types found for files {}".format(",".join(files["files"]))
                 log_and_print(log_fhand, msg)
                 raise RuntimeError(msg)
-            jobs.append({"group": group, "sub": sub, "name": group+"_"+sub+"_"+"merged",
-                         "files": files["files"], "seq_kind": kinds[0],
-                         "kind": files["kind"], "merged": True})
+            job = {"group": group, "sub": sub, "name": group+"_"+sub+"_"+"merged",
+                   "files": files["files"], "seq_kind": kinds[0],
+                   "kind": files["kind"], "merged": True}
+            #The merged database gets the datasets' cutoffs only if they all
+            #agree; otherwise there is no single cutoff to apply to it.
+            if len(files["bounds"]) == 1:
+                job["lowerbound"], job["upperbound"] = next(iter(files["bounds"]))
+            else:
+                msg = ("#WARNING: datasets of {} {} have different count cutoffs {}; "
+                       "the merged database is built without cutoffs".format(
+                           group, sub, sorted(files["bounds"])))
+                log_and_print(log_fhand, msg)
+            jobs.append(job)
     #A sub's universe is its merged database if it has one, else its only
     #dataset (a sub with several datasets always has a merged one) - this
     #flags the jobs that define it.
@@ -86,7 +99,7 @@ def count_job(job, arguments):
     #Builds the kmc database of one planned job (see plan_jobs).
     input_file_path = create_input_file(job["files"], job["name"], arguments["output"])
     cutoffs = {}
-    if not job["merged"]:
+    if "lowerbound" in job:
         cutoffs = {"min_occurrence": job["lowerbound"], "max_occurrence": job["upperbound"]}
     return count_kmers(input_file_path, job["name"], arguments["output"],
                        job["seq_kind"], kmer_size=arguments["kmer_size"],
@@ -112,7 +125,7 @@ def build_databases(arguments):
         entry = {"file": results["out_fpath"], "kind": job["kind"]}
         if job["merged"]:
             entry["merged"] = True
-        else:
+        if "lowerbound" in job:
             entry.update({"lowerbound": job["lowerbound"], "upperbound": job["upperbound"]})
         database[job["group"]][job["sub"]][job["name"]] = entry
     return database, expression
@@ -144,12 +157,9 @@ def dump_counts(database, threads, kmer_size, log_fhand):
         for sub, data in subs.items():
             kmer_tables[group][sub] = {}
             for name, values in data.items():
-                #NOTE: reads lowerbound/upperbound from `data` (the per-sub dict),
-                #not `values` (the per-name dict) - a known, intentionally
-                #unfixed pre-existing bug (see CHANGELOG). Preserved as-is.
                 table, results = load_kmer_table(values["file"], kmer_size,
-                                            lower_bound=data.get("lowerbound", 1),
-                                            upper_bound=data.get("upperbound", 9999999999),
+                                            lower_bound=values.get("lowerbound", 1),
+                                            upper_bound=values.get("upperbound", 9999999999),
                                             threads=threads, merged=values.get("merged", False))
                 table.kind = values["kind"]
                 kmer_tables[group][sub][name] = {"table": table, "kind": values["kind"],
@@ -216,9 +226,9 @@ def process_samples_sequentially(arguments):
             log_and_print(log_fhand, check_run(count_results))
             db_fpath = count_results["out_fpath"]
             log_and_print(log_fhand, check_run(create_kmer_histogram(db_fpath, name)))
-            #NOTE: dump_counts passes the default cutoffs, not the dataset ones (see
-            #the note there) - kmc has already applied the real ones while counting.
             table, dump_results = load_kmer_table(db_fpath, arguments["kmer_size"],
+                                                  lower_bound=job.get("lowerbound", 1),
+                                                  upper_bound=job.get("upperbound", 9999999999),
                                                   threads=arguments["threads"], merged=job["merged"])
             table.kind = job["kind"]
             log_and_print(log_fhand, check_run(dump_results))

@@ -76,13 +76,16 @@ folded in - see `CHANGELOG.md` for details):
 - Several "already done, skip on rerun" checks reported inconsistently (some
   logged nothing at all).
 
-One bug was found and *deliberately left alone*: the k-mer dump step reads its
-count-cutoff bounds from the wrong dictionary level, so it silently falls back
-to defaults instead of the input file's actual bounds. It's not fixed because
-the k-mer *counting* step upstream already enforces the real bounds correctly,
-so this is likely harmless double-filtering rather than a live bug - but
-changing it would alter which k-mers appear in the dump, so it's flagged
-rather than touched without being asked.
+One bug was found and initially left alone, later fixed: the k-mer dump step
+read its count-cutoff bounds from the wrong dictionary level, so it silently
+fell back to the defaults (`-ci1 -cx9999999999`) instead of the input file's
+bounds. It was harmless for the results (the k-mer *counting* step upstream
+already enforces the real bounds), but the logged command was misleading and a
+reused database built with different bounds wasn't re-filtered. The dump now
+uses each dataset's own bounds. The per-sub merged database gets the datasets'
+bounds too, but only if all of the sub's datasets share them (otherwise there is
+no single cutoff to apply: it is built without cutoffs and a `#WARNING` is
+logged).
 
 ## 3. Reporting both count-based and presence/absence diversity
 
@@ -289,9 +292,6 @@ rather than solved with a different checkpointing mechanism, because:
 
 Kept here so they don't get "rediscovered" as surprises later:
 
-- **Dump-step cutoff bug** (§2) - reads bounds from the wrong dict level,
-  falls back to defaults. Left alone because kmc counting upstream already
-  enforces the real bounds.
 - **Kolmogorov compression-level inconsistency** - the genomic/transcriptome
   path uses zlib level 6 (matching the old `gzip -c` shell command's
   default); the expression path uses level 9 (matching the old Python
