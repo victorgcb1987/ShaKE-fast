@@ -45,6 +45,13 @@ def parse_arguments():
     parser.add_argument("--pooled",
                         help=help_pooled, default=False,
                         action="store_true")
+    help_sequential = ("(Optional) Low-disk mode: process one sample at a time (kmc database, "
+                       "histogram, kmer table, het-kmer merge) and delete its kmc database "
+                       "before moving to the next, instead of keeping every database until the "
+                       "end. Results are written once all samples are done. False by default")
+    parser.add_argument("--sequential", "-s",
+                        help=help_sequential, default=False,
+                        action="store_true")
     help_exclude = "(optional) Bed file with regions to exclude"
     parser.add_argument("--exclude", "-e",
                         help=help_exclude, type=str,
@@ -121,6 +128,7 @@ def get_arguments():
             "kmer_size": parser.kmer_size,
             "merge_universe": parser.merge_universe,
             "pooled": parser.pooled,
+            "sequential": parser.sequential,
             "log": log_fhand}
 
 

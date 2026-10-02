@@ -30,6 +30,23 @@ reports:
   exclusive to one sample in a group, which is useful when comparing samples
   within the same group.
 
+- **Evenness** (`Pielou_Evenness`, `Universe_Evenness`) - Shannon diversity
+  rescaled to 0-1: `H / log(n)` (n = k-mers/genes present in the sample, so
+  it only depends on the sample) and `H / log(U)` (U = universe size, also
+  equal to `1 - Specificity / log(U)`, so it depends on the other samples of
+  the subgroup/group). Base-independent. `nan` if the denominator is 0; not
+  clipped.
+- **Normalized Kolmogorov** (`Kolmogorov_norm`) - the raw ratio is confined to
+  a narrow band (an even profile can't compress below deflate's ~1000:1 cap;
+  random 30-bit counts cost ~6 of the 31 bytes per line, ~0.19) and depends on
+  sequencing depth and universe size. It is rescaled as
+  `(C - floor) / (reference - floor)`, `floor` being the presence/absence
+  payload and `reference` an i.i.d. geometric payload with the sample's n and
+  mean count (the maximum-entropy distribution over non-negative integers at
+  a given mean), both padded to the same universe size. Not defined for
+  expression samples; no presence/absence variant (that payload is fixed by n
+  and the universe size).
+
 Every one of these is now computed twice per sample - once from raw counts,
 once from presence/absence (every observed k-mer/gene counted as 1 regardless
 of its actual abundance) - and reported side by side as `..._presence`

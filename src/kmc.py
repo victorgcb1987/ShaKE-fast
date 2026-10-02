@@ -40,6 +40,18 @@ def count_kmers(input_file, name, output_dir, kind, kmer_size=21,
     return results
     
 
+def remove_kmc_database(db_fpath):
+    #Deletes the files of a kmc database (the prefix/suffix tables are the
+    #ones that take the space). Returns the list of removed paths.
+    removed = []
+    for suffix in (".kmc_pre", ".kmc_suf"):
+        fpath = Path("{}{}".format(db_fpath, suffix))
+        if fpath.exists():
+            fpath.unlink()
+            removed.append(fpath)
+    return removed
+
+
 def create_kmer_histogram(input_db_fpath, name):
     out_histogram_fpath = "{}.hist".format(str(input_db_fpath))
     cmd = "kmc_tools transform {} histogram {}".format(input_db_fpath,

@@ -9,6 +9,7 @@ def calculate_sample_estimators(filepath, estimators, units, exclude, binary=Fal
           universe = len(raw_values)
           if binary:
                raw_values = [1 if float(value) >= 1 else 0 for value in raw_values]
+          n_positive = sum(1 for value in raw_values if value > 0)
           N = sum(raw_values)
           values_log10 = [(float(value)/N) * log10(float(value)/N) if value > 0 else 0 for value in raw_values]
           diversity_log10 =  -sum(value for value in values_log10 if value != 0)
@@ -19,6 +20,7 @@ def calculate_sample_estimators(filepath, estimators, units, exclude, binary=Fal
           values = {"diversity": diversity_log10, "specifity": specifity_log10,
                     "diversity_log10": diversity_log10, "specifity_log10": specifity_log10,
                     "diversity_log2": diversity_log2, "specifity_log2": specifity_log2,
+                    "n_positive": n_positive,
                     "file": filepath}
           estimators[filepath.stem] = values
           return values, universe

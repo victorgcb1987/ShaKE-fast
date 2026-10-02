@@ -1,23 +1,32 @@
 from pathlib import Path
 
-from src.kmc import count_kmers, create_input_file, create_kmer_histogram
+from src.kmc import (count_kmers, create_input_file, create_kmer_histogram,
+                     remove_kmc_database)
+import numpy as np
+
+from itertools import groupby
+
 from src.kmerdata import (load_kmer_table, merge_hetkmers_native, union_universe_size,
-                          shannon_estimators_from_counts, kolmogorov_from_table)
+                          shannon_estimators_from_counts, kolmogorov_estimators_from_counts,
+                          shannon_diversity_log10, shannon_from_diversity_log10,
+                          evenness_from_diversity_log10,
+                          StreamingKolmogorov, kolmogorov_estimators_from_streams)
 from src.kolmogorov import kolmogorov_from_expression_file
 from src.utils import check_run, sequence_kind, log_and_print
 from src.expression import calculate_sample_estimators as expression_diversity
 
 
-def build_databases(arguments):
-    #STEP 1: build a kmc database per group/sub/dataset, plus one merged
-    #database per sub with more than one dataset. Expression-kind datasets
-    #are set aside (no kmer counting) for compute_expression_estimators.
-    database = {}
-    expression = {}
+def plan_jobs(arguments):
+    #Works out, without running anything, every kmc database that has to be
+    #built: one per (non-expression) dataset, plus one merged database per sub
+    #with more than one dataset. Returns (jobs, expression); `jobs` is in the
+    #order they must be built (per group: datasets first, then merged subs).
+    #Expression-kind datasets are set aside (no kmer counting) for
+    #compute_expression_estimators.
     log_fhand = arguments["log"]
-    log_and_print(log_fhand, "#STEP 1: creating databases\n")
+    jobs = []
+    expression = {}
     for group, datasets in arguments["inputs"].items():
-        database[group] = {}
         occurrences = []
         for dataset in datasets:
             if dataset["kind"] == "expression":
@@ -28,28 +37,19 @@ def build_databases(arguments):
                 else:
                     expression[group][dataset["sub"]] += dataset["files"]
                 continue
-            if dataset["sub"] not in database[group]:
-                database[group][dataset["sub"]] = {}
             kinds = [sequence_kind(input_file) for input_file in dataset["files"]]
             if len(set(kinds)) != 1:
                 msg = "ERROR: mixed format types found for files {}".format(",".join(dataset["files"]))
                 log_and_print(log_fhand, msg)
                 raise RuntimeError(msg)
-            kind = kinds[0]
             name = group+"_"+dataset["sub"]
             occurrences.append(name)
-            count = str(occurrences.count(name))
-            name += count
-            input_file_path = create_input_file(dataset["files"], name, arguments["output"])
-            results = count_kmers(input_file_path, name, arguments["output"],
-                                    kind, kmer_size=arguments["kmer_size"],
-                                    threads=arguments["threads"], max_ram=arguments["ram_usage"],
-                                    min_occurrence=dataset["lowerbound"],
-                                    max_occurrence=dataset["upperbound"])
-            log_and_print(log_fhand, check_run(results))
-            database[group][dataset["sub"]][name] = {"file": results["out_fpath"], "kind": dataset["kind"],
-                                                        "lowerbound": dataset["lowerbound"],
-                                                        "upperbound": dataset["upperbound"]}
+            name += str(occurrences.count(name))
+            jobs.append({"group": group, "sub": dataset["sub"], "name": name,
+                         "files": dataset["files"], "seq_kind": kinds[0],
+                         "kind": dataset["kind"], "merged": False,
+                         "lowerbound": dataset["lowerbound"],
+                         "upperbound": dataset["upperbound"]})
         merges = {}
         for dataset in datasets:
             if dataset["kind"] == "expression":
@@ -65,20 +65,56 @@ def build_databases(arguments):
         for sub, files in merges.items():
             if files["num_datasets"] == 1:
                 continue
-            name = group+"_"+sub+"_"+"merged"
             kinds = [sequence_kind(input_file) for input_file in files["files"]]
             if len(set(kinds)) != 1:
                 msg = "ERROR: mixed format types found for files {}".format(",".join(files["files"]))
                 log_and_print(log_fhand, msg)
                 raise RuntimeError(msg)
-            kind = kinds[0]
-            input_file_path = create_input_file(files["files"], name, arguments["output"])
-            results = count_kmers(input_file_path, name, arguments["output"],
-                                    kind, kmer_size=arguments["kmer_size"],
-                                    threads=arguments["threads"], max_ram=arguments["ram_usage"])
-            log_and_print(log_fhand, check_run(results))
-            database[group][sub][name] = {"file": results["out_fpath"], "kind": files["kind"],
-                                                    "merged": True}
+            jobs.append({"group": group, "sub": sub, "name": group+"_"+sub+"_"+"merged",
+                         "files": files["files"], "seq_kind": kinds[0],
+                         "kind": files["kind"], "merged": True})
+    #A sub's universe is its merged database if it has one, else its only
+    #dataset (a sub with several datasets always has a merged one) - this
+    #flags the jobs that define it.
+    with_merged = {(job["group"], job["sub"]) for job in jobs if job["merged"]}
+    for job in jobs:
+        job["in_universe"] = job["merged"] or (job["group"], job["sub"]) not in with_merged
+    return jobs, expression
+
+
+def count_job(job, arguments):
+    #Builds the kmc database of one planned job (see plan_jobs).
+    input_file_path = create_input_file(job["files"], job["name"], arguments["output"])
+    cutoffs = {}
+    if not job["merged"]:
+        cutoffs = {"min_occurrence": job["lowerbound"], "max_occurrence": job["upperbound"]}
+    return count_kmers(input_file_path, job["name"], arguments["output"],
+                       job["seq_kind"], kmer_size=arguments["kmer_size"],
+                       threads=arguments["threads"], max_ram=arguments["ram_usage"],
+                       **cutoffs)
+
+
+def build_databases(arguments):
+    #STEP 1: build a kmc database per group/sub/dataset, plus one merged
+    #database per sub with more than one dataset.
+    log_fhand = arguments["log"]
+    log_and_print(log_fhand, "#STEP 1: creating databases\n")
+    jobs, expression = plan_jobs(arguments)
+    database = {}
+    for group, datasets in arguments["inputs"].items():
+        database[group] = {}
+        for dataset in datasets:
+            if dataset["kind"] != "expression":
+                database[group].setdefault(dataset["sub"], {})
+    for job in jobs:
+        results = count_job(job, arguments)
+        log_and_print(log_fhand, check_run(results))
+        entry = {"file": results["out_fpath"], "kind": job["kind"]}
+        if job["merged"]:
+            entry["merged"] = True
+        else:
+            entry.update({"lowerbound": job["lowerbound"], "upperbound": job["upperbound"]})
+        database[job["group"]][job["sub"]][job["name"]] = entry
     return database, expression
 
 
@@ -122,6 +158,18 @@ def dump_counts(database, threads, kmer_size, log_fhand):
     return kmer_tables
 
 
+def merge_sample_hetkmers(name, values, pooled, log_fhand):
+    #Collapses near-identical kmers of one transcriptome sample in place
+    #(values is the {"table", "kind", ...} entry of kmer_tables).
+    if values["kind"] != "transcriptome":
+        return
+    merged_table, stats = merge_hetkmers_native(values["table"], pooled=pooled)
+    values["table"] = merged_table
+    msg = "#SUCCESS: {} components_found={} components_merged={} components_rejected={}".format(
+        name, stats["components_found"], stats["components_merged"], stats["components_rejected"])
+    log_and_print(log_fhand, msg)
+
+
 def merge_hetkmers(kmer_tables, pooled, log_fhand):
     #STEP 4: for transcriptome data, detect hetkmers (native Hamming-distance-1
     #neighbor search - no smudgeplot) then collapse near-identical kmers
@@ -132,14 +180,94 @@ def merge_hetkmers(kmer_tables, pooled, log_fhand):
     for group, subs in kmer_tables.items():
         for sub, data in subs.items():
             for name, values in data.items():
-                if values["kind"] != "transcriptome":
-                    continue
-                merged_table, stats = merge_hetkmers_native(values["table"], pooled=pooled)
-                values["table"] = merged_table
-                msg = "#SUCCESS: {} components_found={} components_merged={} components_rejected={}".format(
-                    name, stats["components_found"], stats["components_merged"], stats["components_rejected"])
-                log_and_print(log_fhand, msg)
+                merge_sample_hetkmers(name, values, pooled, log_fhand)
     return kmer_tables
+
+
+def process_samples_sequentially(arguments):
+    #Low-disk/low-memory alternative to STEPS 1-6: every sample goes through
+    #its whole chain (kmc database -> histogram -> in-memory kmer table ->
+    #het-kmer merge) on its own and is then reduced to what the results need;
+    #its kmc database (.kmc_pre/.kmc_suf, the bulk of the disk usage) and its
+    #kmer table are dropped before the next sample starts. Only a database
+    #built by this run is deleted - one that was already there is left alone.
+    #
+    #What a sample keeps: its Shannon diversity (it doesn't depend on the
+    #universe size), and a streaming Kolmogorov compressor already fed with
+    #its own counts, waiting for the zeros that the universe size will add.
+    #The universe size depends on the other samples, so specificity and the
+    #Kolmogorov ratio are finished once the last job of the group is done;
+    #until then only the set of kmers defining the universe is kept (a single
+    #running union per group with --merge_universe, nothing at all otherwise,
+    #since a sub's universe is just the size of its merged/only table).
+    log_fhand = arguments["log"]
+    log_and_print(log_fhand, "#SEQUENTIAL MODE: kmc databases and kmer tables are dropped as soon as each sample is summarized\n")
+    jobs, expression = plan_jobs(arguments)
+    results = {}
+    for group, group_jobs in groupby(jobs, key=lambda job: job["group"]):
+        group_jobs = list(group_jobs)
+        samples = []
+        sub_universe = {}
+        group_kmers = np.empty(0, dtype=np.uint64)
+        for job in group_jobs:
+            name = job["name"]
+            log_and_print(log_fhand, "#SAMPLE: {}".format(name))
+            count_results = count_job(job, arguments)
+            log_and_print(log_fhand, check_run(count_results))
+            db_fpath = count_results["out_fpath"]
+            log_and_print(log_fhand, check_run(create_kmer_histogram(db_fpath, name)))
+            #NOTE: dump_counts passes the default cutoffs, not the dataset ones (see
+            #the note there) - kmc has already applied the real ones while counting.
+            table, dump_results = load_kmer_table(db_fpath, arguments["kmer_size"],
+                                                  threads=arguments["threads"], merged=job["merged"])
+            table.kind = job["kind"]
+            log_and_print(log_fhand, check_run(dump_results))
+            if dump_results["returncode"] == 0 and count_results["returncode"] == 0:
+                removed = remove_kmc_database(db_fpath)
+                log_and_print(log_fhand, "#CLEANED: {} ({} files removed)".format(name, len(removed)))
+            values = {"table": table, "kind": job["kind"], "merged": job["merged"]}
+            merge_sample_hetkmers(name, values, arguments["pooled"], log_fhand)
+            table = values["table"]
+            if job["in_universe"]:
+                if arguments["merge_universe"]:
+                    group_kmers = np.union1d(group_kmers, table.kmers)
+                else:
+                    sub_universe[job["sub"]] = table.universe_size()
+            samples.append({"job": job,
+                            "diversity_log10": shannon_diversity_log10(table.counts, presence=False),
+                            "diversity_log10_presence": shannon_diversity_log10(table.counts, presence=True),
+                            "kolmogorov": StreamingKolmogorov(table.counts, presence=False),
+                            "kolmogorov_presence": StreamingKolmogorov(table.counts, presence=True),
+                            "total_count": int(table.counts.sum()),
+                            "n_positive": int((table.counts > 0).sum())})
+            del table, values
+        group_universe = int(group_kmers.shape[0])
+        del group_kmers
+        #same sub order as the regular flow: first appearance among the datasets
+        for sub in dict.fromkeys(job["sub"] for job in group_jobs):
+            for sample in samples:
+                job = sample["job"]
+                if job["sub"] != sub:
+                    continue
+                universe_size = group_universe if arguments["merge_universe"] else sub_universe[sub]
+                entry = results.setdefault(group, {}).setdefault(sub, {}).setdefault(job["name"], {})
+                entry.update(shannon_from_diversity_log10(sample["diversity_log10"], universe_size))
+                entry.update({key + "_presence": value for key, value in
+                              shannon_from_diversity_log10(sample["diversity_log10_presence"], universe_size).items()})
+                entry.update(evenness_from_diversity_log10(sample["diversity_log10"],
+                                                           sample["n_positive"], universe_size))
+                entry.update(kolmogorov_estimators_from_streams(
+                    sample["kolmogorov"], sample["kolmogorov_presence"],
+                    sample["total_count"], universe_size))
+                entry.setdefault("universe_size", universe_size)
+                entry.setdefault("sub", sub)
+                entry.setdefault("name", job["name"])
+                entry.setdefault("kind", job["kind"])
+                log_and_print(log_fhand, "#SUCCESS: computed estimators for {}".format(job["name"]))
+    tmp_dir = arguments["output"] / "tmp"
+    if tmp_dir.is_dir() and not any(tmp_dir.iterdir()):
+        tmp_dir.rmdir()
+    return results, expression
 
 
 def compute_universe_sizes(kmer_tables, merge_universe):
@@ -193,8 +321,9 @@ def compute_estimators(kmer_tables, universe_sizes, merge_universe, log_fhand):
                 entry = results.setdefault(group, {}).setdefault(sub, {}).setdefault(name, {})
                 entry.update(regular)
                 entry.update({key + "_presence": value for key, value in presence.items()})
-                entry["kolmogorov"] = kolmogorov_from_table(table, universe_size, presence=False)
-                entry["kolmogorov_presence"] = kolmogorov_from_table(table, universe_size, presence=True)
+                entry.update(evenness_from_diversity_log10(regular["diversity_log10"],
+                                                           int((table.counts > 0).sum()), universe_size))
+                entry.update(kolmogorov_estimators_from_counts(table.counts, universe_size))
                 entry.setdefault("universe_size", universe_size)
                 entry.setdefault("sub", sub)
                 entry.setdefault("name", name)
@@ -225,6 +354,8 @@ def compute_expression_estimators(expression, results, log_fhand):
                     "specifity_log10_presence": values_presence["specifity_log10"],
                     "file": Path(file),
                 }
+                results[group][sub][rep].update(evenness_from_diversity_log10(
+                    values["diversity_log10"], values["n_positive"], universe_size))
                 results[group][sub][rep]["kolmogorov"] = kolmogorov_from_expression_file(
                     Path(file), "TPM", [], presence=False)
                 results[group][sub][rep]["kolmogorov_presence"] = kolmogorov_from_expression_file(
@@ -247,18 +378,21 @@ def write_outputs(results, output_dir):
             out_fhand.write("Group\tSubgroup\tRep\tKind\tSubgroup_Universe_Size\t"
                              "Diversity_log2\tSpecifity_log2\tDiversity_log10\tSpecifity_log10\tKolmogorov\t"
                              "Diversity_log2_presence\tSpecifity_log2_presence\tDiversity_log10_presence\t"
-                             "Specifity_log10_presence\tKolmogorov_presence\n")
+                             "Specifity_log10_presence\tKolmogorov_presence\tKolmogorov_norm\t"
+                             "Pielou_Evenness\tUniverse_Evenness\n")
             for group, subs in results.items():
                 for sub, reps in subs.items():
                     for rep, features in reps.items():
-                        line = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n"
+                        line = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n"
                         line = line.format(group, sub, rep, features["kind"],
                                             features["universe_size"], features["diversity_log2"],
                                             features["specifity_log2"], features["diversity_log10"],
                                             features["specifity_log10"], features["kolmogorov"],
                                             features["diversity_log2_presence"], features["specifity_log2_presence"],
                                             features["diversity_log10_presence"], features["specifity_log10_presence"],
-                                            features["kolmogorov_presence"])
+                                            features["kolmogorov_presence"],
+                                            features.get("kolmogorov_norm", "NA"),
+                                            features["pielou_evenness"], features["universe_evenness"])
                         out_fhand.write(line)
                         out_fhand.flush()
                         if features["kind"] == "expression":
@@ -274,14 +408,19 @@ def write_outputs(results, output_dir):
 
 def run_pipeline(arguments):
     log_fhand = arguments["log"]
-    database, expression = build_databases(arguments)
-    histograms = build_histograms(database, log_fhand)
-    kmer_tables = dump_counts(database, arguments["threads"], arguments["kmer_size"], log_fhand)
-    kmer_tables = merge_hetkmers(kmer_tables, arguments["pooled"], log_fhand)
-    universe_sizes = compute_universe_sizes(kmer_tables, arguments["merge_universe"])
-    results = compute_estimators(kmer_tables, universe_sizes, arguments["merge_universe"], log_fhand)
+    if arguments.get("sequential", False):
+        #estimators are computed along the way - no tables are kept
+        results, expression = process_samples_sequentially(arguments)
+        steps = {"database": {}, "kmer_tables": {}, "histograms": {}, "expression": expression}
+    else:
+        database, expression = build_databases(arguments)
+        histograms = build_histograms(database, log_fhand)
+        kmer_tables = dump_counts(database, arguments["threads"], arguments["kmer_size"], log_fhand)
+        kmer_tables = merge_hetkmers(kmer_tables, arguments["pooled"], log_fhand)
+        universe_sizes = compute_universe_sizes(kmer_tables, arguments["merge_universe"])
+        results = compute_estimators(kmer_tables, universe_sizes, arguments["merge_universe"], log_fhand)
+        steps = {"database": database, "kmer_tables": kmer_tables,
+                 "histograms": histograms, "expression": expression}
     results = compute_expression_estimators(expression, results, log_fhand)
     write_outputs(results, arguments["output"])
-    steps = {"database": database, "kmer_tables": kmer_tables,
-             "histograms": histograms, "expression": expression}
     return steps, results

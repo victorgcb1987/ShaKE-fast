@@ -240,16 +240,40 @@ def merge_hetkmers_native(table, pooled):
 
 #---------- Shannon diversity ----------
 
-def shannon_estimators_from_counts(counts, universe_size, presence=False):
+def shannon_diversity_log10(counts, presence=False):
+    #The part of the Shannon estimators that only depends on the sample's own
+    #counts - not on the universe size.
     values = (counts >= 1).astype(np.float64) if presence else counts.astype(np.float64)
     N = values.sum()
     p = values[values > 0] / N
-    diversity_log10 = -float(np.sum(p * np.log10(p)))
+    return -float(np.sum(p * np.log10(p)))
+
+
+def shannon_from_diversity_log10(diversity_log10, universe_size):
+    #Completes the estimators once the universe size is known.
     specifity_log10 = math.log10(universe_size) - diversity_log10
     diversity_log2 = diversity_log10 / LOG10_2
     specifity_log2 = math.log2(universe_size) - diversity_log2
     return {"diversity_log10": diversity_log10, "specifity_log10": specifity_log10,
             "diversity_log2": diversity_log2, "specifity_log2": specifity_log2}
+
+
+def evenness_from_diversity_log10(diversity_log10, n_positive, universe_size):
+    #Shannon diversity rescaled to 0-1 (the ratio is the same in any log base):
+    #  pielou_evenness   = H / log(n)  - n: kmers/genes actually present in the
+    #                      sample, so it only depends on the sample itself;
+    #  universe_evenness = H / log(U)  - U: the universe size, so it also
+    #                      reflects how much of the universe the sample covers.
+    #NaN when the denominator is 0 (n <= 1 or U <= 1). Not clipped: H/log(U)
+    #can marginally exceed 1 if a sample has more kmers than its universe
+    #(possible after het-kmer merging).
+    nan = float("nan")
+    return {"pielou_evenness": diversity_log10 / math.log10(n_positive) if n_positive > 1 else nan,
+            "universe_evenness": diversity_log10 / math.log10(universe_size) if universe_size > 1 else nan}
+
+
+def shannon_estimators_from_counts(counts, universe_size, presence=False):
+    return shannon_from_diversity_log10(shannon_diversity_log10(counts, presence), universe_size)
 
 
 #---------- Kolmogorov complexity ratio, fully in-memory ----------
@@ -282,3 +306,113 @@ def kolmogorov_from_table(table, universe_size, presence=False):
     else:
         payload = counts_to_binary_bytes(table.counts, 30, num_zeros)
     return kolmogorov_ratio(payload)
+
+
+class StreamingKolmogorov:
+    """kolmogorov_from_table split in two so the table doesn't have to be kept.
+
+    The sample's own counts are compressed as soon as it is built (in chunks,
+    never materializing the whole payload); only the compressor state (a few
+    hundred KB) is kept. When the universe size is finally known, `finish`
+    feeds the missing zeros (also in chunks) and returns the same ratio
+    kolmogorov_from_table gives.
+    """
+    BIT_WIDTH = 30
+    CHUNK = 262144
+
+    def __init__(self, counts=None, presence=False, compresslevel=6):
+        self.presence = presence
+        self.n = 0
+        self._compressor = zlib.compressobj(compresslevel)
+        self._compressed = 0
+        self._raw = 0
+        if counts is not None:
+            for start in range(0, counts.shape[0], self.CHUNK):
+                self.feed_counts(counts[start:start + self.CHUNK])
+
+    def feed_counts(self, part):
+        self.n += int(part.shape[0])
+        if self.presence:
+            self._feed(b"01\n" * part.shape[0])
+        else:
+            self._feed(counts_to_binary_bytes(part, self.BIT_WIDTH))
+
+    def _feed(self, payload):
+        self._raw += len(payload)
+        self._compressed += len(self._compressor.compress(payload))
+
+    def finish_sizes(self, universe_size):
+        #Pads with zeros up to the universe size and returns
+        #(compressed_size, raw_size). Can only be called once.
+        zero_line = b"00\n" if self.presence else b"0" * self.BIT_WIDTH + b"\n"
+        remaining = max(universe_size - self.n, 0)
+        while remaining > 0:
+            step = min(remaining, self.CHUNK)
+            self._feed(zero_line * step)
+            remaining -= step
+        self._compressed += len(self._compressor.flush())
+        return self._compressed, self._raw
+
+    def finish(self, universe_size):
+        compressed, raw = self.finish_sizes(universe_size)
+        return compressed / raw if raw else 0.0
+
+
+#---------- normalized Kolmogorov ----------
+#The raw ratio lives in a very narrow band (an even profile can't go below
+#deflate's ~1000:1 cap, a random 30-bit one can't go above ~0.19 of the count
+#lines) and depends on depth and universe size. The normalized version
+#places the sample between two references with the same n and universe size:
+#  floor   - the presence/absence payload (every count the same);
+#  ceiling - i.i.d. geometric counts with the sample's own mean, the maximum
+#            entropy distribution over non-negative integers at a given mean.
+REFERENCE_SEED = 20240601
+
+
+def reference_compressed_size(n, mean_count, universe_size, seed=REFERENCE_SEED):
+    #Compressed size of the geometric reference. Deterministic (fixed seed,
+    #fixed chunking), so the same inputs always give the same number.
+    reference = StreamingKolmogorov(presence=False)
+    if n > 0:
+        rng = np.random.default_rng(seed)
+        p = min(1.0, 1.0 / max(mean_count, 1.0))
+        cap = (1 << StreamingKolmogorov.BIT_WIDTH) - 1
+        done = 0
+        while done < n:
+            step = min(n - done, StreamingKolmogorov.CHUNK)
+            reference.feed_counts(np.minimum(rng.geometric(p, size=step), cap).astype(np.int64))
+            done += step
+    return reference.finish_sizes(universe_size)[0]
+
+
+def normalize_kolmogorov(sample_size, floor_size, reference_size):
+    #(C - floor) / (reference - floor). NaN when it is undefined (no k-mers,
+    #or a reference that isn't more complex than the floor). Not clipped: a
+    #sample can come out slightly above 1 because deflate doesn't reach the
+    #true entropy of the reference.
+    denominator = reference_size - floor_size
+    if denominator <= 0:
+        return float("nan")
+    return (sample_size - floor_size) / denominator
+
+
+def kolmogorov_estimators_from_counts(counts, universe_size):
+    #kolmogorov, kolmogorov_presence and kolmogorov_norm in one pass over the
+    #counts (same numbers as kolmogorov_from_table for the first two).
+    regular = StreamingKolmogorov(counts, presence=False)
+    presence = StreamingKolmogorov(counts, presence=True)
+    return kolmogorov_estimators_from_streams(regular, presence, counts.sum(), universe_size)
+
+
+def kolmogorov_estimators_from_streams(regular, presence, total_count, universe_size):
+    n = regular.n
+    sample_size, raw = regular.finish_sizes(universe_size)
+    floor_size, raw_presence = presence.finish_sizes(universe_size)
+    if n == 0:
+        norm = float("nan")
+    else:
+        reference_size = reference_compressed_size(n, total_count / n, universe_size)
+        norm = normalize_kolmogorov(sample_size, floor_size, reference_size)
+    return {"kolmogorov": sample_size / raw if raw else 0.0,
+            "kolmogorov_presence": floor_size / raw_presence if raw_presence else 0.0,
+            "kolmogorov_norm": norm}
