@@ -82,7 +82,11 @@ fell back to the defaults (`-ci1 -cx9999999999`) instead of the input file's
 bounds. It was harmless for the results (the k-mer *counting* step upstream
 already enforces the real bounds), but the logged command was misleading and a
 reused database built with different bounds wasn't re-filtered. The dump now
-uses each dataset's own bounds. The per-sub merged database gets the datasets'
+uses each dataset's own bounds. `kmc_tools` 3.2.4 turned out to honor only the
+first of `-ci`/`-cx` when both are given before `dump` (the other is silently
+ignored), so the dump command carries `-ci` only and the upper bound (plus the
+lower one, defensively) is enforced on the parsed counts in `load_kmer_table`.
+The per-sub merged database gets the datasets'
 bounds too, but only if all of the sub's datasets share them (otherwise there is
 no single cutoff to apply: it is built without cutoffs and a `#WARNING` is
 logged).

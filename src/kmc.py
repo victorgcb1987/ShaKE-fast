@@ -100,8 +100,13 @@ def dump_kmer_counts(db_fpath, name, threads=6, lower_bound=1, upper_bound=99999
 def build_dump_argv(db_fpath, threads, lower_bound, upper_bound):
     #Dumps straight to /dev/stdout so callers can stream the output via
     #subprocess.Popen(..., stdout=PIPE) without ever writing a dump file.
+    #NOTE: kmc_tools (3.2.4) only honors the first of -ci/-cx when both are
+    #given as input parameters of `transform ... dump` - the other one is
+    #silently ignored. So only -ci goes to kmc_tools here; the upper bound
+    #(and, defensively, the lower one) is enforced by load_kmer_table on the
+    #parsed counts.
     return ["kmc_tools", "-t{}".format(threads), "transform", str(db_fpath),
-            "-ci{}".format(lower_bound), "-cx{}".format(upper_bound), "dump", "-s", "/dev/stdout"]
+            "-ci{}".format(lower_bound), "dump", "-s", "/dev/stdout"]
 
 
 def calculate_hetkmers(dump_fpath, out_fdir):

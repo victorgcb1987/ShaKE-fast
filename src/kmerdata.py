@@ -94,6 +94,11 @@ def load_kmer_table(db_fpath, k, threads=6, lower_bound=1, upper_bound=999999999
         empty = KmerTable(np.empty(0, dtype=np.uint64), np.empty(0, dtype=np.int64), k, merged=merged)
         return empty, results
     table = parse_dump_bytes(raw_stdout, k, merged=merged)
+    #kmc_tools is only trusted for -ci (see build_dump_argv): enforce both
+    #bounds here so the result never depends on how kmc_tools parses them.
+    keep = (table.counts >= lower_bound) & (table.counts <= upper_bound)
+    if not keep.all():
+        table = KmerTable(table.kmers[keep], table.counts[keep], k, merged=merged)
     return table, results
 
 
