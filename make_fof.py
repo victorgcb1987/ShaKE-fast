@@ -11,9 +11,19 @@ sample_R1.fq.gz / sample_R2.fq.gz, sample_R1_001.fastq.gz / sample_R2_001.fastq.
 are put together on the same line, comma separated, read 1 first. Files
 without a mate are written alone (single-end reads, fasta assemblies, bam).
 
+By default each sample is its own group (so the k-mer universe of each sample is
+just its own k-mers: no zeros are added to its counts). To compare samples through
+a common universe without losing which sample (e.g. which SRA run) each row is, use
+--sample-as-subgroup: all samples go in ONE group (--group, "all" by default) and
+each sample's name is written in the subgroup column, so results.tsv keeps it in the
+Subgroup (and Rep) columns. Run SHaKE.py with --merge_universe (-m) so that the
+universe is the union of the k-mers of every subgroup of the group.
+
 Usage:
     python make_fof.py -i /path/to/reads -o fof.tsv --subgroup R --kind transcriptome
     python make_fof.py -i /path/to/reads --group onegroup --subgroup R --kind genome
+    python make_fof.py -i /path/to/reads -o fof.tsv --sample-as-subgroup --group atlas
+    python SHaKE.py -i fof.tsv -o results_dir --merge_universe
 """
 import argparse
 import re
@@ -49,6 +59,11 @@ def parse_arguments():
                         help="(Optional) maximum kmer count cutoff. 9999999999 by default")
     parser.add_argument("--recursive", "-r", action="store_true", default=False,
                         help="(Optional) also search subdirectories. False by default")
+    parser.add_argument("--sample-as-subgroup", action="store_true", default=False,
+                        help="(Optional) put every sample in one group (--group, 'all' by default) and "
+                             "write the sample name in the subgroup column, so the samples share a "
+                             "universe when SHaKE.py runs with --merge_universe and each row keeps "
+                             "its sample name. --subgroup is ignored. False by default")
     parser.add_argument("--relative", action="store_true", default=False,
                         help="(Optional) write paths as given instead of absolute ones")
     parser.add_argument("--glob", type=str, default="",
@@ -107,9 +122,12 @@ def main():
 
     lines = []
     for sample, files in samples:
-        group = args.group if args.group else sample
+        if args.sample_as_subgroup:
+            group, subgroup = (args.group if args.group else "all"), sample
+        else:
+            group, subgroup = (args.group if args.group else sample), args.subgroup
         paths = [str(path if args.relative else path.resolve()) for path in files]
-        lines.append("\t".join([group, args.subgroup, args.kind,
+        lines.append("\t".join([group, subgroup, args.kind,
                                 str(args.lowerbound), str(args.upperbound),
                                 ",".join(paths)]))
 
