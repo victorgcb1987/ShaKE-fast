@@ -7,13 +7,13 @@ import numpy as np
 from itertools import groupby
 
 from src.kmerdata import (load_kmer_table, merge_hetkmers_native, union_universe_size,
-                          shannon_estimators_from_counts, kolmogorov_estimators_from_counts,
+                          shannon_estimators_from_counts, count_complexity_estimators_from_counts,
                           shannon_diversity_log10, shannon_from_diversity_log10,
                           evenness_from_diversity_log10,
-                          StreamingKolmogorov, kolmogorov_estimators_from_streams)
-from src.kolmogorov import kolmogorov_from_expression_file
+                          CountHistogram, count_complexity_estimators)
 from src.utils import check_run, sequence_kind, log_and_print
 from src.expression import calculate_sample_estimators as expression_diversity
+from src.expression import count_complexity_from_expression_file
 
 
 def plan_jobs(arguments):
@@ -203,10 +203,10 @@ def process_samples_sequentially(arguments):
     #built by this run is deleted - one that was already there is left alone.
     #
     #What a sample keeps: its Shannon diversity (it doesn't depend on the
-    #universe size), and a streaming Kolmogorov compressor already fed with
-    #its own counts, waiting for the zeros that the universe size will add.
-    #The universe size depends on the other samples, so specificity and the
-    #Kolmogorov ratio are finished once the last job of the group is done;
+    #universe size), and the histogram of its count values, waiting for the
+    #zeros that the universe size will add. The universe size depends on the
+    #other samples, so specificity and the count complexity are finished once
+    #the last job of the group is done;
     #until then only the set of kmers defining the universe is kept (a single
     #running union per group with --merge_universe, nothing at all otherwise,
     #since a sub's universe is just the size of its merged/only table).
@@ -246,9 +246,7 @@ def process_samples_sequentially(arguments):
             samples.append({"job": job,
                             "diversity_log10": shannon_diversity_log10(table.counts, presence=False),
                             "diversity_log10_presence": shannon_diversity_log10(table.counts, presence=True),
-                            "kolmogorov": StreamingKolmogorov(table.counts, presence=False),
-                            "kolmogorov_presence": StreamingKolmogorov(table.counts, presence=True),
-                            "total_count": int(table.counts.sum()),
+                            "count_histogram": CountHistogram(table.counts),
                             "n_positive": int((table.counts > 0).sum())})
             del table, values
         group_universe = int(group_kmers.shape[0])
@@ -266,9 +264,7 @@ def process_samples_sequentially(arguments):
                               shannon_from_diversity_log10(sample["diversity_log10_presence"], universe_size).items()})
                 entry.update(evenness_from_diversity_log10(sample["diversity_log10"],
                                                            sample["n_positive"], universe_size))
-                entry.update(kolmogorov_estimators_from_streams(
-                    sample["kolmogorov"], sample["kolmogorov_presence"],
-                    sample["total_count"], universe_size))
+                entry.update(count_complexity_estimators(sample["count_histogram"], universe_size))
                 entry.setdefault("universe_size", universe_size)
                 entry.setdefault("sub", sub)
                 entry.setdefault("name", job["name"])
@@ -313,7 +309,7 @@ def compute_universe_sizes(kmer_tables, merge_universe):
 
 
 def compute_estimators(kmer_tables, universe_sizes, merge_universe, log_fhand):
-    #Shannon diversity + kolmogorov estimators for genomic/transcriptome samples,
+    #Shannon diversity + count complexity estimators for genomic/transcriptome samples,
     #computed directly from the in-memory KmerTable - no dump/binary files
     #touch disk anywhere in this step. Each sample gets both a regular
     #(count-based) and a presence/absence pass, reported side by side.
@@ -333,7 +329,7 @@ def compute_estimators(kmer_tables, universe_sizes, merge_universe, log_fhand):
                 entry.update({key + "_presence": value for key, value in presence.items()})
                 entry.update(evenness_from_diversity_log10(regular["diversity_log10"],
                                                            int((table.counts > 0).sum()), universe_size))
-                entry.update(kolmogorov_estimators_from_counts(table.counts, universe_size))
+                entry.update(count_complexity_estimators_from_counts(table.counts, universe_size))
                 entry.setdefault("universe_size", universe_size)
                 entry.setdefault("sub", sub)
                 entry.setdefault("name", name)
@@ -343,7 +339,7 @@ def compute_estimators(kmer_tables, universe_sizes, merge_universe, log_fhand):
 
 
 def compute_expression_estimators(expression, results, log_fhand):
-    #Shannon diversity + kolmogorov estimators for expression samples, written
+    #Shannon diversity + count complexity estimators for expression samples, written
     #into the same `results` dict/schema used for genomic/transcriptome samples.
     #Each sample gets both a regular and a presence/absence pass.
     for group, subs in expression.items():
@@ -366,10 +362,7 @@ def compute_expression_estimators(expression, results, log_fhand):
                 }
                 results[group][sub][rep].update(evenness_from_diversity_log10(
                     values["diversity_log10"], values["n_positive"], universe_size))
-                results[group][sub][rep]["kolmogorov"] = kolmogorov_from_expression_file(
-                    Path(file), "TPM", [], presence=False)
-                results[group][sub][rep]["kolmogorov_presence"] = kolmogorov_from_expression_file(
-                    Path(file), "TPM", [], presence=True)
+                results[group][sub][rep].update(count_complexity_from_expression_file(Path(file), "TPM", []))
                 log_and_print(log_fhand, "#SUCCESS: computed estimators for {}".format(rep))
     return results
 
@@ -386,23 +379,24 @@ def write_outputs(results, output_dir):
         manifest_fhand.flush()
         with open(output_dir / "results.tsv", "w") as out_fhand:
             out_fhand.write("Group\tSubgroup\tRep\tKind\tSubgroup_Universe_Size\t"
-                             "Diversity_log2\tSpecifity_log2\tDiversity_log10\tSpecifity_log10\tKolmogorov\t"
+                             "Diversity_log2\tSpecifity_log2\tDiversity_log10\tSpecifity_log10\tCount_complexity\t"
                              "Diversity_log2_presence\tSpecifity_log2_presence\tDiversity_log10_presence\t"
-                             "Specifity_log10_presence\tKolmogorov_presence\tKolmogorov_norm\t"
-                             "Pielou_Evenness\tUniverse_Evenness\n")
+                             "Specifity_log10_presence\tPresence_complexity\tCount_complexity_norm\t"
+                             "Pielou_Evenness\tUniverse_Evenness\tCount_entropy\n")
             for group, subs in results.items():
                 for sub, reps in subs.items():
                     for rep, features in reps.items():
-                        line = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n"
+                        line = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n"
                         line = line.format(group, sub, rep, features["kind"],
                                             features["universe_size"], features["diversity_log2"],
                                             features["specifity_log2"], features["diversity_log10"],
-                                            features["specifity_log10"], features["kolmogorov"],
+                                            features["specifity_log10"], features["count_complexity"],
                                             features["diversity_log2_presence"], features["specifity_log2_presence"],
                                             features["diversity_log10_presence"], features["specifity_log10_presence"],
-                                            features["kolmogorov_presence"],
-                                            features.get("kolmogorov_norm", "NA"),
-                                            features["pielou_evenness"], features["universe_evenness"])
+                                            features["presence_complexity"],
+                                            features["count_complexity_norm"],
+                                            features["pielou_evenness"], features["universe_evenness"],
+                                            features["count_entropy"])
                         out_fhand.write(line)
                         out_fhand.flush()
                         if features["kind"] == "expression":

@@ -2,6 +2,10 @@
 from csv import DictReader
 from math import log10, log2
 
+import numpy as np
+
+from src.kmerdata import CountHistogram, count_complexity_estimators
+
 
 def calculate_sample_estimators(filepath, estimators, units, exclude, binary=False):
      with open(filepath) as fhand:
@@ -24,3 +28,15 @@ def calculate_sample_estimators(filepath, estimators, units, exclude, binary=Fal
                     "file": filepath}
           estimators[filepath.stem] = values
           return values, universe
+
+
+def count_complexity_from_expression_file(filepath, units, exclude):
+     #Count complexity of an expression table: the values (rounded to 3 decimals
+     #and scaled to integers, as the old Kolmogorov encoding did) play the role
+     #of the counts and the genes of the table are the universe (zero values
+     #are the absent elements).
+     with open(filepath) as fhand:
+          values = [round(float(row[units]), 3) * 1000 for row in DictReader(fhand, delimiter="\t")
+                    if row["Reference"] not in exclude]
+     integers = np.trunc(np.array(values, dtype=np.float64)).astype(np.int64)
+     return count_complexity_estimators(CountHistogram(integers), len(values))

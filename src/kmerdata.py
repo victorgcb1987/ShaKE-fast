@@ -1,6 +1,5 @@
 import math
 import subprocess
-import zlib
 
 from dataclasses import dataclass
 
@@ -281,143 +280,87 @@ def shannon_estimators_from_counts(counts, universe_size, presence=False):
     return shannon_from_diversity_log10(shannon_diversity_log10(counts, presence), universe_size)
 
 
-#---------- Kolmogorov complexity ratio, fully in-memory ----------
+#---------- Count complexity: exact description length of the count values ----------
+#Replaces the compression-based Kolmogorov ratio. The k-mers of a table come in
+#no meaningful order, so the counts are an exchangeable collection and what a
+#compressor can exploit is, in practice, only how often each count value
+#occurs. That is exactly what the histogram (count value -> number of k-mers)
+#holds, and its code length can be computed directly, without building and
+#compressing a payload: no 32 KB window, no ~1000:1 cap, no random reference.
+#
+#The sample is described over its whole universe: U elements, n of them present
+#(count > 0) and U - n absent (count 0, the zeros the universe size adds). The
+#ideal code length of that vector, in bits, is
+#    L = sum_c N_c * log2(U / N_c)          (c = 0 included, N_0 = U - n)
+#      = U * H2(n / U)  +  n * H_c
+#with H2 the binary entropy and H_c the entropy of the count values among the
+#present elements. Dividing by U gives the columns:
+#  count_complexity       L / U                      bits per universe element
+#  presence_complexity    H2(n / U)                  the presence/absence part
+#  count_entropy          H_c                        bits per present element
+#  count_complexity_norm  H_c / H_max(mean - min)    0-1, independent of U
+#H_max(mu) = (mu + 1) log2(mu + 1) - mu log2(mu) is the maximum entropy on the
+#non-negative integers with mean mu (the geometric distribution), applied to
+#the counts shifted so that their minimum is 0; it plays the role of the old
+#geometric reference, in closed form instead of simulated.
+#When the sample is its own universe (U = n) the presence part is 0 and the
+#count complexity is just H_c; with a universe shared by several samples the
+#zeros make it also depend on how much of the universe the sample covers.
 
-def counts_to_binary_bytes(values, bit_width, num_zeros=0):
-    n = values.shape[0]
-    out = np.zeros((n, bit_width + 1), dtype=np.uint8)
-    out[:, -1] = 10  # '\n'
-    v = values.astype(np.uint64)
-    for bit in range(bit_width):
-        shift = bit_width - 1 - bit
-        out[:, bit] = 48 + ((v >> np.uint64(shift)) & np.uint64(1)).astype(np.uint8)
-    payload = out.tobytes()
-    if num_zeros > 0:
-        payload += (b"0" * bit_width + b"\n") * num_zeros
-    return payload
+class CountHistogram:
+    #Histogram of the positive count values of a sample, built in chunks so the
+    #counts never have to be copied whole. Zeros are not stored: they are
+    #U - n, added when the universe size is known.
+    CHUNK = 1 << 22
 
-
-def kolmogorov_ratio(raw_bytes, compresslevel=6):
-    if not raw_bytes:
-        return 0.0
-    return len(zlib.compress(raw_bytes, compresslevel)) / len(raw_bytes)
-
-
-def kolmogorov_from_table(table, universe_size, presence=False):
-    n = table.counts.shape[0]
-    num_zeros = max(universe_size - n, 0)
-    if presence:
-        payload = b"01\n" * n + b"00\n" * num_zeros
-    else:
-        payload = counts_to_binary_bytes(table.counts, 30, num_zeros)
-    return kolmogorov_ratio(payload)
-
-
-class StreamingKolmogorov:
-    """kolmogorov_from_table split in two so the table doesn't have to be kept.
-
-    The sample's own counts are compressed as soon as it is built (in chunks,
-    never materializing the whole payload); only the compressor state (a few
-    hundred KB) is kept. When the universe size is finally known, `finish`
-    feeds the missing zeros (also in chunks) and returns the same ratio
-    kolmogorov_from_table gives.
-    """
-    BIT_WIDTH = 30
-    CHUNK = 262144
-
-    def __init__(self, counts=None, presence=False, compresslevel=6):
-        self.presence = presence
-        self.n = 0
-        self._compressor = zlib.compressobj(compresslevel)
-        self._compressed = 0
-        self._raw = 0
+    def __init__(self, counts=None):
+        self.hist = {}
         if counts is not None:
-            for start in range(0, counts.shape[0], self.CHUNK):
-                self.feed_counts(counts[start:start + self.CHUNK])
+            self.feed_counts(counts)
 
     def feed_counts(self, part):
-        self.n += int(part.shape[0])
-        if self.presence:
-            self._feed(b"01\n" * part.shape[0])
-        else:
-            self._feed(counts_to_binary_bytes(part, self.BIT_WIDTH))
+        part = np.asarray(part)
+        for start in range(0, part.shape[0], self.CHUNK):
+            chunk = part[start:start + self.CHUNK]
+            values, freq = np.unique(chunk[chunk > 0], return_counts=True)
+            for value, number in zip(values.tolist(), freq.tolist()):
+                self.hist[value] = self.hist.get(value, 0) + number
 
-    def _feed(self, payload):
-        self._raw += len(payload)
-        self._compressed += len(self._compressor.compress(payload))
+    @property
+    def n(self):
+        return sum(self.hist.values())
 
-    def finish_sizes(self, universe_size):
-        #Pads with zeros up to the universe size and returns
-        #(compressed_size, raw_size). Can only be called once.
-        zero_line = b"00\n" if self.presence else b"0" * self.BIT_WIDTH + b"\n"
-        remaining = max(universe_size - self.n, 0)
-        while remaining > 0:
-            step = min(remaining, self.CHUNK)
-            self._feed(zero_line * step)
-            remaining -= step
-        self._compressed += len(self._compressor.flush())
-        return self._compressed, self._raw
-
-    def finish(self, universe_size):
-        compressed, raw = self.finish_sizes(universe_size)
-        return compressed / raw if raw else 0.0
+    @property
+    def total(self):
+        return sum(value * number for value, number in self.hist.items())
 
 
-#---------- normalized Kolmogorov ----------
-#The raw ratio lives in a very narrow band (an even profile can't go below
-#deflate's ~1000:1 cap, a random 30-bit one can't go above ~0.19 of the count
-#lines) and depends on depth and universe size. The normalized version
-#places the sample between two references with the same n and universe size:
-#  floor   - the presence/absence payload (every count the same);
-#  ceiling - i.i.d. geometric counts with the sample's own mean, the maximum
-#            entropy distribution over non-negative integers at a given mean.
-REFERENCE_SEED = 20240601
+def binary_entropy(p):
+    return 0.0 if p <= 0.0 or p >= 1.0 else float(-p * math.log2(p) - (1.0 - p) * math.log2(1.0 - p))
 
 
-def reference_compressed_size(n, mean_count, universe_size, seed=REFERENCE_SEED):
-    #Compressed size of the geometric reference. Deterministic (fixed seed,
-    #fixed chunking), so the same inputs always give the same number.
-    reference = StreamingKolmogorov(presence=False)
-    if n > 0:
-        rng = np.random.default_rng(seed)
-        p = min(1.0, 1.0 / max(mean_count, 1.0))
-        cap = (1 << StreamingKolmogorov.BIT_WIDTH) - 1
-        done = 0
-        while done < n:
-            step = min(n - done, StreamingKolmogorov.CHUNK)
-            reference.feed_counts(np.minimum(rng.geometric(p, size=step), cap).astype(np.int64))
-            done += step
-    return reference.finish_sizes(universe_size)[0]
+def max_entropy_nonnegative(mean):
+    #Maximum entropy (bits) of a distribution on {0, 1, 2, ...} with this mean.
+    return 0.0 if mean <= 0 else (mean + 1.0) * math.log2(mean + 1.0) - mean * math.log2(mean)
 
 
-def normalize_kolmogorov(sample_size, floor_size, reference_size):
-    #(C - floor) / (reference - floor). NaN when it is undefined (no k-mers,
-    #or a reference that isn't more complex than the floor). Not clipped: a
-    #sample can come out slightly above 1 because deflate doesn't reach the
-    #true entropy of the reference.
-    denominator = reference_size - floor_size
-    if denominator <= 0:
-        return float("nan")
-    return (sample_size - floor_size) / denominator
-
-
-def kolmogorov_estimators_from_counts(counts, universe_size):
-    #kolmogorov, kolmogorov_presence and kolmogorov_norm in one pass over the
-    #counts (same numbers as kolmogorov_from_table for the first two).
-    regular = StreamingKolmogorov(counts, presence=False)
-    presence = StreamingKolmogorov(counts, presence=True)
-    return kolmogorov_estimators_from_streams(regular, presence, counts.sum(), universe_size)
-
-
-def kolmogorov_estimators_from_streams(regular, presence, total_count, universe_size):
-    n = regular.n
-    sample_size, raw = regular.finish_sizes(universe_size)
-    floor_size, raw_presence = presence.finish_sizes(universe_size)
+def count_complexity_estimators(histogram, universe_size):
+    nan = float("nan")
+    n = histogram.n
     if n == 0:
-        norm = float("nan")
-    else:
-        reference_size = reference_compressed_size(n, total_count / n, universe_size)
-        norm = normalize_kolmogorov(sample_size, floor_size, reference_size)
-    return {"kolmogorov": sample_size / raw if raw else 0.0,
-            "kolmogorov_presence": floor_size / raw_presence if raw_presence else 0.0,
-            "kolmogorov_norm": norm}
+        return {"count_complexity": 0.0, "presence_complexity": 0.0,
+                "count_entropy": 0.0, "count_complexity_norm": nan}
+    universe = max(int(universe_size), n)
+    frequencies = np.array(list(histogram.hist.values()), dtype=np.float64)
+    probabilities = frequencies / n
+    count_entropy = max(0.0, float(-np.sum(probabilities * np.log2(probabilities))))
+    presence_complexity = binary_entropy(n / universe)
+    h_max = max_entropy_nonnegative(histogram.total / n - min(histogram.hist))
+    return {"count_complexity": presence_complexity + n / universe * count_entropy,
+            "presence_complexity": presence_complexity,
+            "count_entropy": count_entropy,
+            "count_complexity_norm": count_entropy / h_max if h_max > 0 else nan}
+
+
+def count_complexity_estimators_from_counts(counts, universe_size):
+    return count_complexity_estimators(CountHistogram(counts), universe_size)

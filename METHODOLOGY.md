@@ -21,14 +21,27 @@ reports:
 - **Specificity** (`Specifity_log2`/`Specifity_log10`) - `log(universe_size) -
   diversity`. This is "how far from maximally even" the sample is, scaled by
   how big the universe of possible k-mers/genes is.
-- **Kolmogorov complexity ratio** - an alternative, non-entropy-based
-  diversity proxy: encode each count as a fixed-width bit string, compress the
-  result, and report `compressed_size / uncompressed_size`. A sample whose
-  counts are highly repetitive/predictable compresses well (low ratio); one
-  whose counts vary a lot compresses poorly (high ratio). It's included
-  because it reacts differently than Shannon entropy to k-mers that are
-  exclusive to one sample in a group, which is useful when comparing samples
-  within the same group.
+- **Count complexity** (`Count_complexity`, `Presence_complexity`,
+  `Count_entropy`) - replaces the former compression-based Kolmogorov ratio.
+  A compressor applied to the counts can, in practice, exploit only how often
+  each count value occurs (the k-mers come in no meaningful order), and zlib is
+  a poor estimator of that (32 KB window, ~1000:1 cap). The histogram of the
+  count values holds exactly that information, so the ideal code length is
+  computed from it directly: with `U` the universe size, `n` the elements present and
+  `N_c` the number of elements with count `c` (`N_0 = U - n` are the zeros the
+  universe size adds), `L = sum_c N_c log2(U / N_c) = U * H2(n / U) + n * H_c`,
+  and the columns are `L / U` (`Count_complexity`), `H2(n / U)`
+  (`Presence_complexity`) and `H_c` (`Count_entropy`, in bits per present
+  element). With a universe shared by several samples (one group/subgroup) the
+  zeros make the value also depend on how much of the universe the sample
+  covers; with one group per sample `U = n` and `Count_complexity = Count_entropy`.
+- **Normalized count complexity** (`Count_complexity_norm`) - `H_c / H_max`, with
+  `H_max(m) = (m + 1) log2(m + 1) - m log2(m)` the maximum entropy on the
+  non-negative integers with mean `m` (geometric), applied to the counts shifted
+  so their minimum is 0. It replaces `Kolmogorov_norm`: same idea (place the
+  sample between the least complex profile and the maximum-entropy one at the
+  same mean), but in closed form, with no simulated reference and no
+  compression. Independent of the universe. `nan` without any spread of counts.
 
 - **Evenness** (`Pielou_Evenness`, `Universe_Evenness`) - Shannon diversity
   rescaled to 0-1: `H / log(n)` (n = k-mers/genes present in the sample, so
@@ -36,17 +49,6 @@ reports:
   equal to `1 - Specificity / log(U)`, so it depends on the other samples of
   the subgroup/group). Base-independent. `nan` if the denominator is 0; not
   clipped.
-- **Normalized Kolmogorov** (`Kolmogorov_norm`) - the raw ratio is confined to
-  a narrow band (an even profile can't compress below deflate's ~1000:1 cap;
-  random 30-bit counts cost ~6 of the 31 bytes per line, ~0.19) and depends on
-  sequencing depth and universe size. It is rescaled as
-  `(C - floor) / (reference - floor)`, `floor` being the presence/absence
-  payload and `reference` an i.i.d. geometric payload with the sample's n and
-  mean count (the maximum-entropy distribution over non-negative integers at
-  a given mean), both padded to the same universe size. Not defined for
-  expression samples; no presence/absence variant (that payload is fixed by n
-  and the universe size).
-
 Every one of these is now computed twice per sample - once from raw counts,
 once from presence/absence (every observed k-mer/gene counted as 1 regardless
 of its actual abundance) - and reported side by side as `..._presence`
@@ -272,16 +274,15 @@ building one compact in-memory table (`KmerTable` in `src/kmerdata.py`:
 sorted numpy arrays of 2-bit-encoded k-mer integers + counts). That single
 table is then reused for universe size (its length), Shannon entropy (a
 vectorized numpy computation over the counts array), het-kmer detection (§4),
-and the Kolmogorov ratio - the fixed-width bit-string encoding is built as an
-in-memory byte buffer and compressed with `zlib.compress()` directly, so
-nothing is ever written to disk for that step either, for genomic,
-transcriptome, or expression samples.
+and the count complexity (a histogram of the count values, §1), so nothing is
+ever written to disk for that step either, for genomic, transcriptome, or
+expression samples.
 
 ### 5.3 The trade-off, taken on deliberately
 
 The existing "if the output already exists, skip this step" resumability
 depended on those intermediate files being there to check. Once they're gone,
-there's nothing left to check, so the dump/het-kmer-merge/estimator/Kolmogorov
+there's nothing left to check, so the dump/het-kmer-merge/estimator/count-complexity
 steps now **always recompute** on every run. This was accepted explicitly
 rather than solved with a different checkpointing mechanism, because:
 - the expensive step - kmc's own database build (`.kmc_pre`/`.kmc_suf`,
@@ -296,23 +297,21 @@ rather than solved with a different checkpointing mechanism, because:
 
 Kept here so they don't get "rediscovered" as surprises later:
 
-- **Kolmogorov compression-level inconsistency** - the genomic/transcriptome
-  path uses zlib level 6 (matching the old `gzip -c` shell command's
-  default); the expression path uses level 9 (matching the old Python
-  `gzip.open()` default). This predates the streaming redesign - it was
-  simply two different pieces of code that happened to pick different
-  defaults - and was preserved rather than unified, so that switching to the
-  in-memory implementation didn't also silently change expression samples'
-  Kolmogorov numbers relative to prior runs. Worth unifying deliberately at
-  some point if genomic and expression Kolmogorov values are ever compared
-  directly against each other.
-- **Old file-based Shannon/Kolmogorov functions** (`src/kmer.py:
-  calculate_sample_shannon_estimators`, `src/kolmogorov.py:
-  calculate_kolmogorov_estimator` and its helpers) are no longer called by
-  the pipeline but were kept in place specifically to make old-vs-new parity
-  testing possible. They're dead code from the pipeline's point of view -
-  reasonable to remove in a future cleanup pass once nobody needs to diff
-  against them anymore.
+- **Replacement of the Kolmogorov columns.** `Kolmogorov`, `Kolmogorov_presence`
+  and `Kolmogorov_norm` (compression-based) were replaced by `Count_complexity`,
+  `Presence_complexity` and `Count_complexity_norm`, and `Count_entropy` was
+  added (last column). The values are not comparable with the old ones (different
+  units: bits per universe element instead of a compression ratio). The
+  zlib-level inconsistency between the genomic and expression paths and the old
+  file-based `src/kolmogorov.py` disappeared with the code; the file-based
+  `src/kmer.py:calculate_sample_shannon_estimators` is still kept, unused, for
+  parity testing.
+- **A sample that is its own group has no zeros.** The universe is the union of
+  the k-mers of the samples of a subgroup (a group with `--merge_universe`); if
+  every sample is its own group, `U = n`, `Specifity_*_presence` is 0,
+  `Presence_complexity` is 0, `Universe_Evenness` equals `Pielou_Evenness` and
+  `Count_complexity` equals `Count_entropy`. Samples that are compared with each
+  other must share a group for those columns to be comparable.
 
 ## 7. Quick map of where things live
 
@@ -321,9 +320,8 @@ Kept here so they don't get "rediscovered" as surprises later:
 | `SHaKE.py` | CLI argument parsing only; calls `src.pipeline.run_pipeline` |
 | `src/pipeline.py` | Stage orchestration - one function per pipeline step |
 | `src/kmc.py` | Wraps external `kmc`/`kmc_tools` calls (database build, histogram, streaming dump command) |
-| `src/kmerdata.py` | In-memory k-mer table, encoding, native het-kmer detection, Shannon entropy, Kolmogorov ratio - the numerical core |
-| `src/kolmogorov.py` | Expression-path Kolmogorov ratio; older file-based functions kept for parity testing only |
+| `src/kmerdata.py` | In-memory k-mer table, encoding, native het-kmer detection, Shannon entropy, count complexity (`CountHistogram`) - the numerical core |
 | `src/kmer.py` | Older file-based Shannon estimator, kept for parity testing only |
-| `src/expression.py` | Expression-table (TPM) Shannon estimator |
+| `src/expression.py` | Expression-table (TPM) Shannon estimator and count complexity |
 | `src/utils.py` | Shared helpers: union-find, BAM/FASTA handling, status logging |
 | `legacy_scripts/` | Predecessor standalone scripts; untouched, still using the older `src/kmc.py`/`src/utils.py` functions directly |
