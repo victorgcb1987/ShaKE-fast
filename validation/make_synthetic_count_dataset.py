@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Generate a small synthetic transcriptome dataset whose k-mer count histograms are
 known exactly, to validate the count-based complexity columns of results.tsv
-(Count_complexity, Presence_complexity, Count_entropy, Count_complexity_norm).
+(Spectrum_entropy_universe, Occupancy_entropy, Spectrum_entropy, Spectrum_entropy_norm).
 
 Three samples are built from random "transcripts" (random 120-mers, whose 21-mers
 are unique and do not overlap between transcripts), each transcript sequenced as
@@ -21,10 +21,10 @@ Two files of files are written:
 The script prints the values each column must have, computed independently from the
 count histograms (direct sum, not through src/kmerdata.py):
 
-    Count_complexity     = sum_c N_c * log2(U / N_c) / U      (c = 0 included, N_0 = U - n)
-    Presence_complexity  = H2(n / U)
-    Count_entropy        = H(count values among the present k-mers)
-    Count_complexity_norm= Count_entropy / Hmax(mean count - minimum count)
+    Spectrum_entropy_universe     = sum_c N_c * log2(U / N_c) / U      (c = 0 included, N_0 = U - n)
+    Occupancy_entropy  = H2(n / U)
+    Spectrum_entropy        = H(count values among the present k-mers)
+    Spectrum_entropy_norm= Spectrum_entropy / Hmax(mean count - minimum count)
 
 With --check the expected values are compared with a results.tsv (max absolute
 difference per column, tolerance 1e-9); the row "group_R_merged" (the pooled database of the
@@ -78,14 +78,14 @@ def expected(counts, universe):
     mean = sum(c * f for c, f in hist.items()) / n
     norm = h_c / hmax(mean - min(hist)) if hmax(mean - min(hist)) > 0 else float("nan")
     return {"n": n, "U": universe,
-            "Count_complexity": direct / universe,
-            "Presence_complexity": h2(n / universe),
-            "Count_entropy": h_c,
-            "Count_complexity_norm": norm}
+            "Spectrum_entropy_universe": direct / universe,
+            "Occupancy_entropy": h2(n / universe),
+            "Spectrum_entropy": h_c,
+            "Spectrum_entropy_norm": norm}
 
 
-COLUMNS = {"Count_complexity": "Count_complexity", "Presence_complexity": "Presence_complexity",
-           "Count_entropy": "Count_entropy", "Count_complexity_norm": "Count_complexity_norm"}
+COLUMNS = {"Spectrum_entropy_universe": "Spectrum_entropy_universe", "Occupancy_entropy": "Occupancy_entropy",
+           "Spectrum_entropy": "Spectrum_entropy", "Spectrum_entropy_norm": "Spectrum_entropy_norm"}
 
 
 def check(results_path, layout, counts, union_size):
@@ -155,10 +155,10 @@ def main():
         print("\n{}".format(layout))
         for name, c in counts.items():
             e = expected(c, universe(c))
-            print("  {:<7} n={:<5} U={:<5} Count_complexity={:.6f} Presence_complexity={:.6f} "
-                  "Count_entropy={:.6f} Count_complexity_norm={:.6f}".format(
-                      name, e["n"], e["U"], e["Count_complexity"], e["Presence_complexity"],
-                      e["Count_entropy"], e["Count_complexity_norm"]))
+            print("  {:<7} n={:<5} U={:<5} Spectrum_entropy_universe={:.6f} Occupancy_entropy={:.6f} "
+                  "Spectrum_entropy={:.6f} Spectrum_entropy_norm={:.6f}".format(
+                      name, e["n"], e["U"], e["Spectrum_entropy_universe"], e["Occupancy_entropy"],
+                      e["Spectrum_entropy"], e["Spectrum_entropy_norm"]))
 
 
 if __name__ == "__main__":

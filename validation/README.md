@@ -47,15 +47,15 @@ If you change the pooled/non-pooled constants in `src/kmerdata.py`
 `NONPOOLED_MIN_COVERAGE_RATIO`), rerun this and update the expected numbers
 above (and in the script's own printed output) accordingly.
 
-## `check_count_complexity.py` and `make_synthetic_count_dataset.py`
+## `check_spectrum_entropy.py` and `make_synthetic_count_dataset.py`
 
-Check the count-histogram complexity columns (`Count_complexity`, `Presence_complexity`,
-`Count_entropy`, `Count_complexity_norm`) that replaced the compression-based Kolmogorov columns.
+Check the count-histogram complexity columns (`Spectrum_entropy_universe`, `Occupancy_entropy`,
+`Spectrum_entropy`, `Spectrum_entropy_norm`) that replaced the compression-based Kolmogorov columns.
 
-- `check_count_complexity.py` runs unit checks of the functions in `src/kmerdata.py` (no `kmc`
+- `check_spectrum_entropy.py` runs unit checks of the functions in `src/kmerdata.py` (no `kmc`
   needed): the decomposition `L/U = H2(n/U) + (n/U) * H_c` against the direct sum, the closed-form
   maximum entropy against the numeric one, the normalised value on geometric and constant counts,
-  zeros and universe size, and edge cases. `python validation/check_count_complexity.py`
+  zeros and universe size, and edge cases. `python validation/check_spectrum_entropy.py`
 - `make_synthetic_count_dataset.py` builds three samples whose k-mer count histograms are known
   exactly (even, skewed with one dominant transcript, and a subset) and two files of files: one with
   the samples in one group (shared universe, zeros padded) and one with each sample in its own group

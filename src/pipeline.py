@@ -7,13 +7,13 @@ import numpy as np
 from itertools import groupby
 
 from src.kmerdata import (load_kmer_table, merge_hetkmers_native, union_universe_size,
-                          shannon_estimators_from_counts, count_complexity_estimators_from_counts,
+                          shannon_estimators_from_counts, spectrum_entropy_estimators_from_counts,
                           shannon_diversity_log10, shannon_from_diversity_log10,
-                          evenness_from_diversity_log10,
-                          CountHistogram, count_complexity_estimators)
+                          evenness_from_diversity_log10, presence_estimators,
+                          CountHistogram, spectrum_entropy_estimators)
 from src.utils import check_run, sequence_kind, log_and_print
 from src.expression import calculate_sample_estimators as expression_diversity
-from src.expression import count_complexity_from_expression_file
+from src.expression import spectrum_entropy_from_expression_file
 
 
 def plan_jobs(arguments):
@@ -245,7 +245,7 @@ def process_samples_sequentially(arguments):
                     sub_universe[job["sub"]] = table.universe_size()
             samples.append({"job": job,
                             "diversity_log10": shannon_diversity_log10(table.counts, presence=False),
-                            "diversity_log10_presence": shannon_diversity_log10(table.counts, presence=True),
+                            "richness_log10": shannon_diversity_log10(table.counts, presence=True),
                             "count_histogram": CountHistogram(table.counts),
                             "n_positive": int((table.counts > 0).sum())})
             del table, values
@@ -260,11 +260,10 @@ def process_samples_sequentially(arguments):
                 universe_size = group_universe if arguments["merge_universe"] else sub_universe[sub]
                 entry = results.setdefault(group, {}).setdefault(sub, {}).setdefault(job["name"], {})
                 entry.update(shannon_from_diversity_log10(sample["diversity_log10"], universe_size))
-                entry.update({key + "_presence": value for key, value in
-                              shannon_from_diversity_log10(sample["diversity_log10_presence"], universe_size).items()})
+                entry.update(presence_estimators(shannon_from_diversity_log10(sample["richness_log10"], universe_size)))
                 entry.update(evenness_from_diversity_log10(sample["diversity_log10"],
                                                            sample["n_positive"], universe_size))
-                entry.update(count_complexity_estimators(sample["count_histogram"], universe_size))
+                entry.update(spectrum_entropy_estimators(sample["count_histogram"], universe_size))
                 entry.setdefault("universe_size", universe_size)
                 entry.setdefault("sub", sub)
                 entry.setdefault("name", job["name"])
@@ -326,10 +325,10 @@ def compute_estimators(kmer_tables, universe_sizes, merge_universe, log_fhand):
                 presence = shannon_estimators_from_counts(table.counts, universe_size, presence=True)
                 entry = results.setdefault(group, {}).setdefault(sub, {}).setdefault(name, {})
                 entry.update(regular)
-                entry.update({key + "_presence": value for key, value in presence.items()})
+                entry.update(presence_estimators(presence))
                 entry.update(evenness_from_diversity_log10(regular["diversity_log10"],
                                                            int((table.counts > 0).sum()), universe_size))
-                entry.update(count_complexity_estimators_from_counts(table.counts, universe_size))
+                entry.update(spectrum_entropy_estimators_from_counts(table.counts, universe_size))
                 entry.setdefault("universe_size", universe_size)
                 entry.setdefault("sub", sub)
                 entry.setdefault("name", name)
@@ -354,15 +353,15 @@ def compute_expression_estimators(expression, results, log_fhand):
                     "kind": "expression", "universe_size": universe_size,
                     "diversity_log2": values["diversity_log2"], "specifity_log2": values["specifity_log2"],
                     "diversity_log10": values["diversity_log10"], "specifity_log10": values["specifity_log10"],
-                    "diversity_log2_presence": values_presence["diversity_log2"],
-                    "specifity_log2_presence": values_presence["specifity_log2"],
-                    "diversity_log10_presence": values_presence["diversity_log10"],
-                    "specifity_log10_presence": values_presence["specifity_log10"],
+                    "richness_log2": values_presence["diversity_log2"],
+                    "universe_gap_log2": values_presence["specifity_log2"],
+                    "richness_log10": values_presence["diversity_log10"],
+                    "universe_gap_log10": values_presence["specifity_log10"],
                     "file": Path(file),
                 }
                 results[group][sub][rep].update(evenness_from_diversity_log10(
                     values["diversity_log10"], values["n_positive"], universe_size))
-                results[group][sub][rep].update(count_complexity_from_expression_file(Path(file), "TPM", []))
+                results[group][sub][rep].update(spectrum_entropy_from_expression_file(Path(file), "TPM", []))
                 log_and_print(log_fhand, "#SUCCESS: computed estimators for {}".format(rep))
     return results
 
@@ -379,10 +378,10 @@ def write_outputs(results, output_dir):
         manifest_fhand.flush()
         with open(output_dir / "results.tsv", "w") as out_fhand:
             out_fhand.write("Group\tSubgroup\tRep\tKind\tSubgroup_Universe_Size\t"
-                             "Diversity_log2\tSpecifity_log2\tDiversity_log10\tSpecifity_log10\tCount_complexity\t"
-                             "Diversity_log2_presence\tSpecifity_log2_presence\tDiversity_log10_presence\t"
-                             "Specifity_log10_presence\tPresence_complexity\tCount_complexity_norm\t"
-                             "Pielou_Evenness\tUniverse_Evenness\tCount_entropy\n")
+                             "Diversity_log2\tSpecifity_log2\tDiversity_log10\tSpecifity_log10\tSpectrum_entropy_universe\t"
+                             "Richness_log2\tUniverse_gap_log2\tRichness_log10\t"
+                             "Universe_gap_log10\tOccupancy_entropy\tSpectrum_entropy_norm\t"
+                             "Pielou_Evenness\tUniverse_Evenness\tSpectrum_entropy\n")
             for group, subs in results.items():
                 for sub, reps in subs.items():
                     for rep, features in reps.items():
@@ -390,13 +389,13 @@ def write_outputs(results, output_dir):
                         line = line.format(group, sub, rep, features["kind"],
                                             features["universe_size"], features["diversity_log2"],
                                             features["specifity_log2"], features["diversity_log10"],
-                                            features["specifity_log10"], features["count_complexity"],
-                                            features["diversity_log2_presence"], features["specifity_log2_presence"],
-                                            features["diversity_log10_presence"], features["specifity_log10_presence"],
-                                            features["presence_complexity"],
-                                            features["count_complexity_norm"],
+                                            features["specifity_log10"], features["spectrum_entropy_universe"],
+                                            features["richness_log2"], features["universe_gap_log2"],
+                                            features["richness_log10"], features["universe_gap_log10"],
+                                            features["occupancy_entropy"],
+                                            features["spectrum_entropy_norm"],
                                             features["pielou_evenness"], features["universe_evenness"],
-                                            features["count_entropy"])
+                                            features["spectrum_entropy"])
                         out_fhand.write(line)
                         out_fhand.flush()
                         if features["kind"] == "expression":

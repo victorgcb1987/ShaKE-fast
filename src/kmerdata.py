@@ -262,6 +262,16 @@ def shannon_from_diversity_log10(diversity_log10, universe_size):
             "diversity_log2": diversity_log2, "specifity_log2": specifity_log2}
 
 
+#The presence/absence pass (every count set to 1) is richness, and its "specifity" is
+#the gap between the universe and the sample.
+PRESENCE_KEYS = {"diversity_log10": "richness_log10", "diversity_log2": "richness_log2",
+                 "specifity_log10": "universe_gap_log10", "specifity_log2": "universe_gap_log2"}
+
+
+def presence_estimators(estimators):
+    return {PRESENCE_KEYS[key]: value for key, value in estimators.items()}
+
+
 def evenness_from_diversity_log10(diversity_log10, n_positive, universe_size):
     #Shannon diversity rescaled to 0-1 (the ratio is the same in any log base):
     #  pielou_evenness   = H / log(n)  - n: kmers/genes actually present in the
@@ -295,10 +305,10 @@ def shannon_estimators_from_counts(counts, universe_size, presence=False):
 #      = U * H2(n / U)  +  n * H_c
 #with H2 the binary entropy and H_c the entropy of the count values among the
 #present elements. Dividing by U gives the columns:
-#  count_complexity       L / U                      bits per universe element
-#  presence_complexity    H2(n / U)                  the presence/absence part
-#  count_entropy          H_c                        bits per present element
-#  count_complexity_norm  H_c / H_max(mean - min)    0-1, independent of U
+#  spectrum_entropy_universe  L / U                  bits per universe element
+#  occupancy_entropy      H2(n / U)                  the present/absent part
+#  spectrum_entropy       H_c                        bits per present element
+#  spectrum_entropy_norm  H_c / H_max(mean - min)    0-1, independent of U
 #H_max(mu) = (mu + 1) log2(mu + 1) - mu log2(mu) is the maximum entropy on the
 #non-negative integers with mean mu (the geometric distribution), applied to
 #the counts shifted so that their minimum is 0; it plays the role of the old
@@ -344,23 +354,23 @@ def max_entropy_nonnegative(mean):
     return 0.0 if mean <= 0 else (mean + 1.0) * math.log2(mean + 1.0) - mean * math.log2(mean)
 
 
-def count_complexity_estimators(histogram, universe_size):
+def spectrum_entropy_estimators(histogram, universe_size):
     nan = float("nan")
     n = histogram.n
     if n == 0:
-        return {"count_complexity": 0.0, "presence_complexity": 0.0,
-                "count_entropy": 0.0, "count_complexity_norm": nan}
+        return {"spectrum_entropy_universe": 0.0, "occupancy_entropy": 0.0,
+                "spectrum_entropy": 0.0, "spectrum_entropy_norm": nan}
     universe = max(int(universe_size), n)
     frequencies = np.array(list(histogram.hist.values()), dtype=np.float64)
     probabilities = frequencies / n
-    count_entropy = max(0.0, float(-np.sum(probabilities * np.log2(probabilities))))
-    presence_complexity = binary_entropy(n / universe)
+    spectrum_entropy = max(0.0, float(-np.sum(probabilities * np.log2(probabilities))))
+    occupancy_entropy = binary_entropy(n / universe)
     h_max = max_entropy_nonnegative(histogram.total / n - min(histogram.hist))
-    return {"count_complexity": presence_complexity + n / universe * count_entropy,
-            "presence_complexity": presence_complexity,
-            "count_entropy": count_entropy,
-            "count_complexity_norm": count_entropy / h_max if h_max > 0 else nan}
+    return {"spectrum_entropy_universe": occupancy_entropy + n / universe * spectrum_entropy,
+            "occupancy_entropy": occupancy_entropy,
+            "spectrum_entropy": spectrum_entropy,
+            "spectrum_entropy_norm": spectrum_entropy / h_max if h_max > 0 else nan}
 
 
-def count_complexity_estimators_from_counts(counts, universe_size):
-    return count_complexity_estimators(CountHistogram(counts), universe_size)
+def spectrum_entropy_estimators_from_counts(counts, universe_size):
+    return spectrum_entropy_estimators(CountHistogram(counts), universe_size)

@@ -21,8 +21,8 @@ reports:
 - **Specificity** (`Specifity_log2`/`Specifity_log10`) - `log(universe_size) -
   diversity`. This is "how far from maximally even" the sample is, scaled by
   how big the universe of possible k-mers/genes is.
-- **Count complexity** (`Count_complexity`, `Presence_complexity`,
-  `Count_entropy`) - replaces the former compression-based Kolmogorov ratio.
+- **Count complexity** (`Spectrum_entropy_universe`, `Occupancy_entropy`,
+  `Spectrum_entropy`) - replaces the former compression-based Kolmogorov ratio.
   A compressor applied to the counts can, in practice, exploit only how often
   each count value occurs (the k-mers come in no meaningful order), and zlib is
   a poor estimator of that (32 KB window, ~1000:1 cap). The histogram of the
@@ -30,12 +30,12 @@ reports:
   computed from it directly: with `U` the universe size, `n` the elements present and
   `N_c` the number of elements with count `c` (`N_0 = U - n` are the zeros the
   universe size adds), `L = sum_c N_c log2(U / N_c) = U * H2(n / U) + n * H_c`,
-  and the columns are `L / U` (`Count_complexity`), `H2(n / U)`
-  (`Presence_complexity`) and `H_c` (`Count_entropy`, in bits per present
+  and the columns are `L / U` (`Spectrum_entropy_universe`), `H2(n / U)`
+  (`Occupancy_entropy`) and `H_c` (`Spectrum_entropy`, in bits per present
   element). With a universe shared by several samples (one group/subgroup) the
   zeros make the value also depend on how much of the universe the sample
-  covers; with one group per sample `U = n` and `Count_complexity = Count_entropy`.
-- **Normalized count complexity** (`Count_complexity_norm`) - `H_c / H_max`, with
+  covers; with one group per sample `U = n` and `Spectrum_entropy_universe = Spectrum_entropy`.
+- **Normalized count complexity** (`Spectrum_entropy_norm`) - `H_c / H_max`, with
   `H_max(m) = (m + 1) log2(m + 1) - m log2(m)` the maximum entropy on the
   non-negative integers with mean `m` (geometric), applied to the counts shifted
   so their minimum is 0. It replaces `Kolmogorov_norm`: same idea (place the
@@ -51,7 +51,7 @@ reports:
   clipped.
 Every one of these is now computed twice per sample - once from raw counts,
 once from presence/absence (every observed k-mer/gene counted as 1 regardless
-of its actual abundance) - and reported side by side as `..._presence`
+of its actual abundance) - and reported side by side as `Richness_*` and `Universe_gap_*`
 columns. See §3 for why.
 
 ## 2. Structural refactor (informatics)
@@ -298,8 +298,8 @@ rather than solved with a different checkpointing mechanism, because:
 Kept here so they don't get "rediscovered" as surprises later:
 
 - **Replacement of the Kolmogorov columns.** `Kolmogorov`, `Kolmogorov_presence`
-  and `Kolmogorov_norm` (compression-based) were replaced by `Count_complexity`,
-  `Presence_complexity` and `Count_complexity_norm`, and `Count_entropy` was
+  and `Kolmogorov_norm` (compression-based) were replaced by `Spectrum_entropy_universe`,
+  `Occupancy_entropy` and `Spectrum_entropy_norm`, and `Spectrum_entropy` was
   added (last column). The values are not comparable with the old ones (different
   units: bits per universe element instead of a compression ratio). The
   zlib-level inconsistency between the genomic and expression paths and the old
@@ -308,9 +308,9 @@ Kept here so they don't get "rediscovered" as surprises later:
   parity testing.
 - **A sample that is its own group has no zeros.** The universe is the union of
   the k-mers of the samples of a subgroup (a group with `--merge_universe`); if
-  every sample is its own group, `U = n`, `Specifity_*_presence` is 0,
-  `Presence_complexity` is 0, `Universe_Evenness` equals `Pielou_Evenness` and
-  `Count_complexity` equals `Count_entropy`. Samples that are compared with each
+  every sample is its own group, `U = n`, `Universe_gap_*` is 0,
+  `Occupancy_entropy` is 0, `Universe_Evenness` equals `Pielou_Evenness` and
+  `Spectrum_entropy_universe` equals `Spectrum_entropy`. Samples that are compared with each
   other must share a group for those columns to be comparable.
 
 ## 7. Quick map of where things live
